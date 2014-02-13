@@ -1,3 +1,5 @@
 [user]
 	email = holden@pigscanfly.ca
 	name = Holden Karau
+[push]
+	default = simple
