@@ -1,3 +1,4 @@
+;; For hi-res
 (set-face-attribute 'default nil :height 180)
 (require 'package)
 (add-to-list 'package-archives
