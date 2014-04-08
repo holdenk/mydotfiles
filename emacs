@@ -1,11 +1,16 @@
 ;; For hi-res
 (set-face-attribute 'default nil :height 100)
 (require 'package)
+(require 'cl)
 (add-to-list 'package-archives
              '("melpa" . "http://melpa.milkbox.net/packages/") t)
+(add-to-list 'package-archives
+             '("marmalade" . "http://marmalade-repo.org/packages/") t)
 (package-initialize)
 (unless (package-installed-p 'scala-mode2)
   (package-refresh-contents) (package-install 'scala-mode2))
+(unless (package-installed-p 'adoc-mode)
+  (package-refresh-contents) (package-install 'adoc-mode))
 ;; Shell Hook
 (add-hook 'sh-mode-hook
           (function (lambda ()
@@ -51,6 +56,8 @@
 			     (setq show-trailing-whitespace t)
 			     (whitespace-mode f)
 )))				      
+;; asciidoc is fun
+(add-to-list 'auto-mode-alist (cons "\\.asciidoc\\'" 'adoc-mode))
 ;; Load ensime
 (add-to-list 'load-path "~/ensime")
 (require 'ensime)
