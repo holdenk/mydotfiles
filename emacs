@@ -1,5 +1,5 @@
 ;; For hi-res
-(set-face-attribute 'default nil :height 100)
+(set-face-attribute 'default nil :height 90)
 (require 'package)
 (require 'cl)
 (add-to-list 'package-archives
@@ -55,10 +55,15 @@
 			     ;; trailing whitespace
 			     (setq show-trailing-whitespace t)
 			     (whitespace-mode f)
-)))				      
+)))
 ;; asciidoc is fun
 (add-to-list 'auto-mode-alist (cons "\\.asciidoc\\'" 'adoc-mode))
+;; spelling is hard
+(add-hook 'scala-mode-hook (lambda ()
+			     (flyspell-prog-mode)))
+(add-hook 'adoc-mode-hook (lambda ()
+			     (flyspell-mode 1)))
 ;; Load ensime
-(add-to-list 'load-path "~/ensime")
+(add-to-list 'load-path "~/ensime/elisp")
 (require 'ensime)
 (add-hook 'scala-mode-hook 'ensime-scala-mode-hook)
