@@ -10,3 +10,17 @@ g++
 python
 perl
 build-essential
+axel
+wireshark
+nmap
+python-pip
+python-dev
+python-dbg
+python-cyclone
+screen
+mplayer
+vlc
+graphviz
+hub
+vlc-nox
+browser-plugin-vlc
