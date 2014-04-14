@@ -1,11 +1,16 @@
 ;; For hi-res
-(set-face-attribute 'default nil :height 180)
+(set-face-attribute 'default nil :height 140)
 (require 'package)
 (add-to-list 'package-archives
              '("melpa" . "http://melpa.milkbox.net/packages/") t)
+(add-to-list 'package-archives 
+    '("marmalade" .
+      "http://marmalade-repo.org/packages/"))
 (package-initialize)
 (unless (package-installed-p 'scala-mode2)
   (package-refresh-contents) (package-install 'scala-mode2))
+(unless (package-installed-p 'adoc-mode)
+  (package-refresh-contents) (package-install 'adoc-mode))
 ;; Shell Hook
 (add-hook 'sh-mode-hook
           (function (lambda ()
@@ -21,8 +26,7 @@
 
    ;; use sbt-run-previous-command to re-compile your code after changes
    (local-set-key (kbd "C-x '") 'sbt-run-previous-command)
-)
+))
 ;; Load ensime
 (add-to-list 'load-path "~/ensime")
 (require 'ensime)
-
