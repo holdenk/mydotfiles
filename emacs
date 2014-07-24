@@ -1,5 +1,8 @@
 ;; For hi-res
 (set-face-attribute 'default nil :height 140)
+;; Turn on debug on quit
+(setq debug-on-quit 't)
+;; Load packages
 (require 'package)
 (require 'cl)
 (add-to-list 'package-archives
@@ -67,3 +70,31 @@
 (add-to-list 'load-path "~/ensime/elisp")
 (require 'ensime)
 (add-hook 'scala-mode-hook 'ensime-scala-mode-hook)
+
+;; clojure crap
+(unless (package-installed-p 'company)
+  (package-refresh-contents) (package-install 'company))
+(unless (package-installed-p 'magit)
+  (package-refresh-contents) (package-install 'magit))
+(unless (package-installed-p 'cider)
+  (package-refresh-contents) (package-install 'cider))
+(require 'company)
+(require 'magit)
+(global-set-key (kbd "C-x g") 'magit-status)
+(require 'cider)
+(define-key company-active-map (kbd "M-n") nil)
+(define-key company-active-map (kbd "M-p") nil)
+(define-key company-active-map (kbd "<up>") nil)
+(define-key company-active-map (kbd "RET") nil)
+(define-key company-active-map [return] nil)
+(define-key company-active-map [tab] nil)
+(define-key company-active-map [space] nil)
+(define-key company-active-map (kbd "TAB") nil)
+(define-key company-active-map (kbd "C-<down>") 'company-select-next)
+(define-key company-active-map (kbd "C-<up>") 'company-select-previous)
+(define-key company-active-map (kbd "<C-return>") 'company-complete-selection)
+(global-company-mode)
+(add-hook 'cider-mode-hook 'cider-turn-on-eldoc-mode)
+(add-hook 'cider-mode-hook 'subword-mode)
+(add-hook 'clojure-mode-hook 'cider-mode)
+(set 'cider-prefer-local-resources t)
