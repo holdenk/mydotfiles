@@ -1,5 +1,6 @@
+(setq scala-indent:use-javadoc-style t)
 ;; For hi-res
-(set-face-attribute 'default nil :height 90)
+(set-face-attribute 'default nil :height 120)
 ;; Turn on debug on quit
 (setq debug-on-quit 't)
 ;; Load packages
@@ -14,6 +15,8 @@
   (package-refresh-contents) (package-install 'scala-mode2))
 (unless (package-installed-p 'adoc-mode)
   (package-refresh-contents) (package-install 'adoc-mode))
+(unless (package-installed-p 'ensime)
+  (package-refresh-contents) (package-install 'ensime))
 ;; Shell Hook
 (add-hook 'sh-mode-hook
           (function (lambda ()
@@ -32,14 +35,16 @@
 ))
 ;; scala indents
 (add-hook 'scala-mode-hook (function (lambda ()
-				       (require 'whitespace)
 				       (local-set-key (kbd "RET") 'newline-and-indent)
 				       (make-local-variable 'before-save-hook)
 				       (add-hook 'before-save-hook 'whitespace-cleanup)
 				       ;; trailing whitespace
-				       (setq show-trailing-whitespace t)
-				       (whitespace-mode f)
-				       ;; TODO 4 space indents on new line
+				       (c-set-offset 'arglist-intro '4)
+				       (local-set-key (kbd "RET")
+						      '(lambda ()
+							 (interactive)
+							 (newline-and-indent)
+							 (scala-indent:insert-asterisk-on-multiline-comment)))
 				       )))
 ;; Enable transient mark mode
 (transient-mark-mode 1)
@@ -57,7 +62,7 @@
 			     (c-set-offset 'arglist-intro '+)
 			     ;; trailing whitespace
 			     (setq show-trailing-whitespace t)
-			     (whitespace-mode f)
+			     (whitespace-mode 'f)
 )))
 ;; asciidoc is fun
 (add-to-list 'auto-mode-alist (cons "\\.asciidoc\\'" 'adoc-mode))
@@ -67,7 +72,6 @@
 (add-hook 'adoc-mode-hook (lambda ()
 			     (flyspell-mode 1)))
 ;; Load ensime
-(add-to-list 'load-path "~/ensime/elisp")
 (require 'ensime)
 (add-hook 'scala-mode-hook 'ensime-scala-mode-hook)
 
@@ -98,3 +102,6 @@
 (add-hook 'cider-mode-hook 'subword-mode)
 (add-hook 'clojure-mode-hook 'cider-mode)
 (set 'cider-prefer-local-resources t)
+;; ess (R and crap)
+(add-to-list 'load-path "/usr/share/emacs24/site-lisp/ess")
+(load "ess-site")
