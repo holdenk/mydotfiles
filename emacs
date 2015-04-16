@@ -1,4 +1,11 @@
-(setq scala-indent:use-javadoc-style t)
+;; No startup screen
+
+(setq inhibit-startup-screen t)
+
+;; Enable column-number-mode
+
+(setq column-number-mode t)
+
 ;; For hi-res
 (set-face-attribute 'default nil :height 120)
 ;; Turn on debug on quit
@@ -34,12 +41,13 @@
    (local-set-key (kbd "C-x '") 'sbt-run-previous-command)
 ))
 ;; scala indents
+(setq scala-indent:use-javadoc-style t)
 (add-hook 'scala-mode-hook (function (lambda ()
 				       (local-set-key (kbd "RET") 'newline-and-indent)
 				       (make-local-variable 'before-save-hook)
 				       (add-hook 'before-save-hook 'whitespace-cleanup)
 				       ;; trailing whitespace
-				       (c-set-offset 'arglist-intro '4)
+				       (c-set-offset 'arglist-intro 4)
 				       (local-set-key (kbd "RET")
 						      '(lambda ()
 							 (interactive)
@@ -61,8 +69,8 @@
 				   backward-delete-function nil)
 			     (c-set-offset 'arglist-intro '+)
 			     ;; trailing whitespace
-			     (setq show-trailing-whitespace t)
-			     (whitespace-mode 'f)
+			     ;;(setq show-trailing-whitespace t)
+			     ;;(whitespace-mode 'f)
 )))
 ;; asciidoc is fun
 (add-to-list 'auto-mode-alist (cons "\\.asciidoc\\'" 'adoc-mode))
