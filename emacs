@@ -17,13 +17,16 @@
              '("melpa" . "http://melpa.milkbox.net/packages/") t)
 (add-to-list 'package-archives
              '("marmalade" . "http://marmalade-repo.org/packages/") t)
+
+(setq package-list '(ensime magit find-things-fast scala-mode2 adoc-mode))
 (package-initialize)
-(unless (package-installed-p 'scala-mode2)
-  (package-refresh-contents) (package-install 'scala-mode2))
-(unless (package-installed-p 'adoc-mode)
-  (package-refresh-contents) (package-install 'adoc-mode))
-(unless (package-installed-p 'ensime)
-  (package-refresh-contents) (package-install 'ensime))
+;; Fetch package list
+(unless package-archive-contents
+  (package-refresh-contents))
+;; Install the missing packages
+(dolist (package package-list)
+  (unless (package-installed-p package)
+    (package-install package)))
 ;; Shell Hook
 (add-hook 'sh-mode-hook
           (function (lambda ()
@@ -113,3 +116,6 @@
 ;; ess (R and crap)
 (add-to-list 'load-path "/usr/share/emacs24/site-lisp/ess")
 (load "ess-site")
+
+(global-set-key (kbd "C-x t") 'ftf-find-file) ; bind to C-x t
+(setq ftf-filetypes '("*"))                   ; allow all filetypes
