@@ -29,6 +29,9 @@ perl
 build-essential
 axel
 wireshark
+whois
+wget
+unzip
 nmap
 python-pip
 python-dev
@@ -46,3 +49,16 @@ ansible
 libx32gfortran3
 gfortran-doc
 gfortran
+zip
+texlive-latex-extra
+texlive-latex-recommended
+texlive-pstricks
+latex-beamer
+graphviz
+strongswan
+strace
+python2.7
+python3.4
+python-dev
+openjdk-7-jdk
+openjdk-7-source
