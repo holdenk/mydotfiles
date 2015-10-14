@@ -7,17 +7,20 @@
 (setq column-number-mode t)
 
 ;; For hi-res
-(set-face-attribute 'default nil :height 120)
+(set-face-attribute 'default nil :height 140)
 ;; Turn on debug on quit
 (setq debug-on-quit 't)
 ;; Load packages
 (require 'package)
 (require 'cl)
-(add-to-list 'package-archives
-             '("melpa" . "http://melpa.milkbox.net/packages/") t)
-(add-to-list 'package-archives
-             '("marmalade" . "http://marmalade-repo.org/packages/") t)
 
+(setq package-archives '(("gnu" . "http://elpa.gnu.org/packages/")
+                         ("marmalade" . "http://marmalade-repo.org/packages/")
+                         ("melpa" . "http://melpa.milkbox.net/packages/")))
+(package-initialize)
+
+(when (not package-archive-contents)
+  (package-refresh-contents))
 (setq package-list '(ensime magit find-things-fast scala-mode2 adoc-mode))
 (package-initialize)
 ;; Fetch package list
