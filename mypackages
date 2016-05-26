@@ -62,3 +62,14 @@ python3.4
 python-dev
 openjdk-7-jdk
 openjdk-7-source
+openjdk-8-jdk
+openjdk-8-source
+protobuf-c-compiler
+protobuf-compiler
+p7zip-full
+dtrx
+rpm-i18n
+p7zip-rar
+alien
+elfutils
+aria2

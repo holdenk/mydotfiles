@@ -21,7 +21,8 @@
 
 (when (not package-archive-contents)
   (package-refresh-contents))
-(setq package-list '(ensime magit find-things-fast scala-mode2 adoc-mode))
+;;(setq package-list '(ensime magit find-things-fast scala-mode2 adoc-mode))
+(setq package-list '(magit find-things-fast scala-mode2 adoc-mode))
 (package-initialize)
 ;; Fetch package list
 (unless package-archive-contents
@@ -117,8 +118,8 @@
 (add-hook 'clojure-mode-hook 'cider-mode)
 (set 'cider-prefer-local-resources t)
 ;; ess (R and crap)
-(add-to-list 'load-path "/usr/share/emacs24/site-lisp/ess")
-(load "ess-site")
+;;(add-to-list 'load-path "/usr/share/emacs24/site-lisp/ess")
+;;(load "ess-site")
 
 (global-set-key (kbd "C-x t") 'ftf-find-file) ; bind to C-x t
 (setq ftf-filetypes '("*"))                   ; allow all filetypes
