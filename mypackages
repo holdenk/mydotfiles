@@ -73,3 +73,5 @@ p7zip-rar
 alien
 elfutils
 aria2
+transmission-cli
+pssh
