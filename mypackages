@@ -75,3 +75,5 @@ elfutils
 aria2
 transmission-cli
 pssh
+python-virtualenv
+python3-dev
