@@ -77,3 +77,10 @@ transmission-cli
 pssh
 python-virtualenv
 python3-dev
+vlc-plugin-jack
+vlc-plugin-sdl
+vlc-plugin-svg
+vlc-plugin-vlsub
+vlc-plugin-zvbi
+libqtgstreamer-dev
+ubuntu-restricted-extras
