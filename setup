@@ -1,3 +1,5 @@
+set -x
+set -e
 sudo apt-get install aptitude
 sudo aptitude install `cat mypackages`
 virtualenv ~/beam_py3_env -p python3
