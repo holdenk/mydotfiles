@@ -14,7 +14,7 @@ sqlite
 r-cran-rsqlite
 libsqlite3-dev
 sqlite3
-emacs24
+emacs25
 irssi
 git
 scala
@@ -39,7 +39,6 @@ screen
 mplayer
 vlc
 graphviz
-vlc-nox
 browser-plugin-vlc
 ansible
 libx32gfortran3
@@ -70,18 +69,9 @@ transmission-cli
 pssh
 python-virtualenv
 python3-dev
-vlc-plugin-jack
-vlc-plugin-sdl
-vlc-plugin-svg
-vlc-plugin-vlsub
-vlc-plugin-zvbi
-libqtgstreamer-dev
 hugin
 ffmpeg2theora
 parallel
-libav-tools
-ruby2.3
-ruby2.3-dev
 pandoc
 curl
 make
