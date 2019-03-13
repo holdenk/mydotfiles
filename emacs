@@ -123,3 +123,5 @@
 
 (global-set-key (kbd "C-x t") 'ftf-find-file) ; bind to C-x t
 (setq ftf-filetypes '("*"))                   ; allow all filetypes
+;; Tramp mode
+(setq tramp-default-method "ssh")
