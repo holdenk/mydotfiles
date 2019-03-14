@@ -113,3 +113,4 @@ x11proto-composite-dev
 x11proto-xinerama-dev
 zlib1g-dev
 yasm
+libfile-slurp-perl
