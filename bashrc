@@ -144,3 +144,6 @@ export GOPATH=$GOHOME
 export PATH=$PATH:$GOHOME/bin:~/bin:/usr/local/go/bin
 [[ -r "/usr/local/etc/profile.d/bash_completion.sh" ]] && . "/usr/local/etc/profile.d/bash_completion.sh"
 [[ -r "/usr/local/etc/bash_completion.d/kubectl" ]] && . "/usr/local/etc/bash_completion.d/kubectl"
+# OS X colourize ls
+alias ls='ls -G'
+alias ll='ls -lG'
