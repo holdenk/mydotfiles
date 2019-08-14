@@ -7,7 +7,7 @@
 (setq column-number-mode t)
 
 ;; For hi-res
-(set-face-attribute 'default nil :height 140)
+(set-face-attribute 'default nil :height 170)
 ;; Turn on debug on quit
 (setq debug-on-quit 't)
 ;; Load packages
@@ -22,7 +22,7 @@
 (when (not package-archive-contents)
   (package-refresh-contents))
 ;;(setq package-list '(ensime magit find-things-fast scala-mode2 adoc-mode))
-(setq package-list '(magit find-things-fast scala-mode2 adoc-mode))
+(setq package-list '(magit find-things-fast adoc-mode ensime))
 (package-initialize)
 ;; Fetch package list
 (unless package-archive-contents
@@ -125,3 +125,5 @@
 (setq ftf-filetypes '("*"))                   ; allow all filetypes
 ;; Tramp mode
 (setq tramp-default-method "ssh")
+;; Highlight wasn't super visible on this machine
+(set-face-attribute 'region nil :background "#999")
