@@ -1,13 +1,31 @@
 set -x
 set -e
 sudo apt-get install aptitude
+sudo apt-get install \
+    apt-transport-https \
+    ca-certificates \
+    curl \
+    gnupg-agent \
+    software-properties-common
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+sudo add-apt-repository \
+   "deb [arch=amd64] https://download.docker.com/linux/ubuntu \
+   $(lsb_release -cs) \
+   stable"
+sudo apt-get update && sudo apt-get upgrade
+sudo apt-get install docker-ce docker-ce-cli containerd.io
 sudo aptitude install `cat mypackages`
-virtualenv ~/beam_py3_env -p python3
-virtualenv ~/beam_py_env
-source ~/beam_py_env/bin/activate
-pip install -r beam_req.txt
-deactivate
-source ~/beam_py3_env/bin/activate
-pip install -r beam_req.txt
-deactivate
+sudo add-apt-repository ppa:obsproject/obs-studio
+sudo apt update
+sudo apt install obs-studio
+#virtualenv ~/beam_py3_env -p python3
+#virtualenv ~/beam_py_env
+#source ~/beam_py_env/bin/activate
+#pip install -r beam_req.txt
+#deactivate
+#source ~/beam_py3_env/bin/activate
+#pip install -r beam_req.txt
+#deactivate
 cp gitconfig ~/.gitconfig
+git config --global user.email "holden@pigscanfly.ca"
+git config --global user.name "Holden Karau"

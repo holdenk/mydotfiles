@@ -1,5 +1,29 @@
-wget https://dl.google.com/go/go1.10.1.linux-amd64.tar.gz
-sudo tar -C /usr/local -xvf go1.10.1.linux-amd64.tar.gz
+#tailscale
+echo 'net.ipv4.ip_forward = 1' | sudo tee -a /etc/sysctl.conf
+
+# NOTE: These instructions only work for 64 bit Debian-based
+# Linux distributions such as Ubuntu, Mint etc.
+
+# 1. Install our official public software signing key
+wget -O- https://updates.signal.org/desktop/apt/keys.asc |\
+  sudo apt-key add -
+
+# 2. Add our repository to your list of repositories
+echo "deb [arch=amd64] https://updates.signal.org/desktop/apt xenial main" |\
+  sudo tee -a /etc/apt/sources.list.d/signal-xenial.list
+
+# 3. Update your package database and install signal
+sudo apt update && sudo apt install signal-desktop
+
+curl -sL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x2EE0EA64E40A89B84B2DF73499E82A75642AC823" | sudo apt-key add
+curl https://pkgs.tailscale.com/stable/ubuntu/focal.gpg | sudo apt-key add -
+curl https://pkgs.tailscale.com/stable/ubuntu/focal.list | sudo tee /etc/apt/sources.list.d/tailscale.list
+echo "deb https://dl.bintray.com/sbt/debian /" | sudo tee -a /etc/apt/sources.list.d/sbt.list
+sudo apt-get update
+sudo apt-get install tailscale sbt
+sudo tailscale up
+wget https://dl.google.com/go/go1.13.1.linux-amd64.tar.gz
+sudo tar -C /usr/local -xvf go1.13.1.linux-amd64.tar.gz
 sudo pip install Pygments sphinx pypandoc mkdocs &
 sudo gem2.3 install jekyll pygments.rb &
 sudo Rscript -e 'install.packages(c("knitr", "devtools", "roxygen2", "testthat", "rmarkdown"), repos="http://cran.stat.ucla.edu/")' &
