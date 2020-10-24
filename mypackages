@@ -112,3 +112,5 @@ x11proto-xinerama-dev
 zlib1g-dev
 yasm
 libfile-slurp-perl
+jq
+emacs-gtk
