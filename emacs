@@ -22,7 +22,8 @@
 (when (not package-archive-contents)
   (package-refresh-contents))
 ;;(setq package-list '(ensime magit find-things-fast scala-mode2 adoc-mode))
-(setq package-list '(magit find-things-fast adoc-mode ensime))
+;;(setq package-list '(magit find-things-fast adoc-mode ensime))
+(setq package-list '(magit find-things-fast adoc-mode go-mode flycheck jsonnet-mode use-package lsp-mode lsp-ui sbt-mode yaml-mode yasnippet markdown-mode dockerfile-mode))
 (package-initialize)
 ;; Fetch package list
 (unless package-archive-contents
