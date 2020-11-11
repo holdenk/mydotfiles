@@ -1,7 +1,12 @@
 set -x
 set -e
-sudo apt-get install aptitude
-sudo apt-get install \
+# Install etcher
+echo "deb https://deb.etcher.io stable etcher" | sudo tee /etc/apt/sources.list.d/balena-etcher.list
+sudo add-apt-repository -y ppa:apt-fast/stable
+sudo apt-get update
+sudo apt-get -y install apt-fast
+sudo apt-get install -y aptitude
+sudo apt-get install -y \
     apt-transport-https \
     ca-certificates \
     curl \
@@ -12,12 +17,12 @@ sudo add-apt-repository \
    "deb [arch=amd64] https://download.docker.com/linux/ubuntu \
    $(lsb_release -cs) \
    stable"
-sudo apt-get update && sudo apt-get upgrade
-sudo apt-get install docker-ce docker-ce-cli containerd.io
-sudo aptitude install `cat mypackages`
-sudo add-apt-repository ppa:obsproject/obs-studio
-sudo apt update
-sudo apt install obs-studio
+sudo apt-get update && sudo apt-get -y upgrade
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io
+sudo apt-fast install -y `cat mypackages`
+sudo add-apt-repository -y ppa:obsproject/obs-studio
+sudo apt-fast update
+sudo apt-fast install -y obs-studio
 #virtualenv ~/beam_py3_env -p python3
 #virtualenv ~/beam_py_env
 #source ~/beam_py_env/bin/activate
@@ -29,3 +34,41 @@ sudo apt install obs-studio
 cp gitconfig ~/.gitconfig
 git config --global user.email "holden@pigscanfly.ca"
 git config --global user.name "Holden Karau"
+set -ex
+# Set up conda/mamba
+export arch=$(uname -m)
+if [ "$arch" == "aarm64" ]; then
+  arch="arm64";
+fi
+wget --quiet https://github.com/conda-forge/miniforge/releases/download/4.8.5-1/Miniforge3-4.8.5-1-Linux-${arch}.sh -O ~/miniforge.sh
+chmod a+x ~/miniforge.sh
+sudo ~/miniforge.sh -b -p /opt/conda
+sudo /opt/conda/bin/conda clean -tipsy
+sudo ln -s /opt/conda/etc/profile.d/conda.sh /etc/profile.d/conda.sh
+echo ". /opt/conda/etc/profile.d/conda.sh" >> ~/.bashrc
+echo "conda activate base" >> ~/.bashrc
+source ~/.bashrc
+find /opt/conda/ -follow -type f -name '*.a' -delete
+find /opt/conda/ -follow -type f -name '*.js.map' -delete
+sudo /opt/conda/bin/conda clean -afy
+sudo /opt/conda/bin/conda install --yes nomkl cytoolz cmake tini
+sudo /opt/conda/bin/conda init bash
+sudo /opt/conda/bin/conda install --yes mamba
+sudo mamba install --yes python==3.8.6 \
+sudo mamba install --yes \
+    cytoolz \
+    dask==2.30.0 \
+    dask-core==2.30.0 \
+    lz4 \
+    numpy==1.19.2 \
+    pandas \
+    tini \
+    scikit-build \
+    python-blosc=1.9.2 \
+    pyzmq
+sudo mamba install --yes s3fs gcsfs dropboxdrivefs requests dropbox paramiko adlfs pygit2 pyarrow
+sudo mamba install --yes bokeh 
+sudo (mamba install --yes aiohttp==3.7.1 || pip install aiohttp==3.7.1 )
+sudo (mamba install --yes jupyter-server-proxy || pip install jupyter-server-proxy)
+sudo (mamba install --yes llvmlite numba )
+sudo (mamba install --yes fastparquet || pip install fastparquet

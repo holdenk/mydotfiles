@@ -50,3 +50,9 @@ wget https://github.com/ksonnet/ksonnet/releases/download/v0.9.1/ks_0.9.1_linux_
 tar -xvf ks_0.9.1_linux_amd64.tar.gz
 mv ks_0.9.1_linux_amd64/ks ~/bin/
 popd
+# Bluez
+mkdir -p /tmp/bluez
+pushd /tmp/bluez
+wget http://www.kernel.org/pub/linux/bluetooth/bluez-5.54.tar.xz
+tar -xvf bluez-5.54.tar.xz
+cd bluez-5.54
