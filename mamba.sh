@@ -16,4 +16,4 @@ mamba install --yes bokeh
 (mamba install --yes aiohttp==3.7.1 || pip install aiohttp==3.7.1 )
 (mamba install --yes jupyter-server-proxy || pip install jupyter-server-proxy)
 (mamba install --yes llvmlite numba )
-(mamba install --yes fastparquet || pip install fastparquet
+(mamba install --yes fastparquet || pip install fastparquet)

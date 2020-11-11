@@ -114,3 +114,4 @@ libfile-slurp-perl
 jq
 emacs-gtk
 balena-etcher-electron
+libdbus-1-dev
