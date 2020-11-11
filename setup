@@ -46,27 +46,11 @@ sudo ~/miniforge.sh -b -p /opt/conda
 sudo /opt/conda/bin/conda clean -tipsy
 sudo ln -s /opt/conda/etc/profile.d/conda.sh /etc/profile.d/conda.sh
 echo ". /opt/conda/etc/profile.d/conda.sh" >> ~/.bashrc
+echo ". /opt/conda/etc/profile.d/conda.sh" | sudo tee -a ~/.bashrc
 echo "conda activate base" >> ~/.bashrc
+echo "conda activate base" | sudo tee -a ~/.bashrc
 source ~/.bashrc
 sudo /opt/conda/bin/conda clean -afy
 sudo /opt/conda/bin/conda install --yes nomkl cytoolz cmake tini
 sudo /opt/conda/bin/conda init bash
 sudo /opt/conda/bin/conda install --yes mamba
-sudo mamba install --yes python==3.8.6 \
-sudo mamba install --yes \
-    cytoolz \
-    dask==2.30.0 \
-    dask-core==2.30.0 \
-    lz4 \
-    numpy==1.19.2 \
-    pandas \
-    tini \
-    scikit-build \
-    python-blosc=1.9.2 \
-    pyzmq
-sudo mamba install --yes s3fs gcsfs dropboxdrivefs requests dropbox paramiko adlfs pygit2 pyarrow
-sudo mamba install --yes bokeh 
-sudo (mamba install --yes aiohttp==3.7.1 || pip install aiohttp==3.7.1 )
-sudo (mamba install --yes jupyter-server-proxy || pip install jupyter-server-proxy)
-sudo (mamba install --yes llvmlite numba )
-sudo (mamba install --yes fastparquet || pip install fastparquet
