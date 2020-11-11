@@ -48,8 +48,6 @@ sudo ln -s /opt/conda/etc/profile.d/conda.sh /etc/profile.d/conda.sh
 echo ". /opt/conda/etc/profile.d/conda.sh" >> ~/.bashrc
 echo "conda activate base" >> ~/.bashrc
 source ~/.bashrc
-find /opt/conda/ -follow -type f -name '*.a' -delete
-find /opt/conda/ -follow -type f -name '*.js.map' -delete
 sudo /opt/conda/bin/conda clean -afy
 sudo /opt/conda/bin/conda install --yes nomkl cytoolz cmake tini
 sudo /opt/conda/bin/conda init bash
