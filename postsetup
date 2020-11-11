@@ -1,3 +1,4 @@
+set -ex
 #tailscale
 echo 'net.ipv4.ip_forward = 1' | sudo tee -a /etc/sysctl.conf
 
@@ -56,3 +57,18 @@ pushd /tmp/bluez
 wget http://www.kernel.org/pub/linux/bluetooth/bluez-5.54.tar.xz
 tar -xvf bluez-5.54.tar.xz
 cd bluez-5.54
+./configure
+make
+sudo make install
+mkdir -p /tmp/libbtbb
+pushd /tmp/libbtbb
+wget https://github.com/greatscottgadgets/libbtbb/archive/2018-12-R1.tar.gz -O libbtbb-2018-12-R1.tar.gz
+tar xf libbtbb-2018-12-R1.tar.gz
+cd libbtbb-2018-12-R1
+export ENABLE_PYTHON=true
+mkdir build
+cd build
+cmake ..
+make
+sudo make install
+sudo ldconfig
