@@ -1,1 +1,10 @@
-sudo add-apt-repository ppa:openjdk-r/ppa
+#!/bin/bash
+set -e
+set -x
+mkdir /tmp/bloop
+cd /tmp/bloop
+apt-get -y install git
+git clone https://github.com/holdenk/mydotfiles.git
+cd mydotfiles
+./setup
+./postsetup
