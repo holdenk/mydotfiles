@@ -1,3 +1,16 @@
+# Checkout all of my repos
+mkdir -p ~/repos
+pushd ~/repos
+CNTX=users; NAME=holdenk;
+for PAGE in 1 2 3; do
+  REPOS = $(curl "https://api.github.com/$CNTX/$NAME/repos?page=$PAGE&per_page=100" |
+              grep -e 'git_url*' |
+ 	      cut -d \" -f 4)
+  for REPO in ${REPOS}; do 
+    git clone $REPO || echo "Already cloned $REPO"
+  done
+done
+popd
 set -ex
 #tailscale
 echo 'net.ipv4.ip_forward = 1' | sudo tee -a /etc/sysctl.conf
@@ -21,10 +34,11 @@ curl https://pkgs.tailscale.com/stable/ubuntu/focal.gpg | sudo apt-key add -
 curl https://pkgs.tailscale.com/stable/ubuntu/focal.list | sudo tee /etc/apt/sources.list.d/tailscale.list
 echo "deb https://dl.bintray.com/sbt/debian /" | sudo tee -a /etc/apt/sources.list.d/sbt.list
 sudo apt-get update
-sudo apt-get install tailscale sbt
-sudo tailscale up
-wget https://dl.google.com/go/go1.13.1.linux-amd64.tar.gz
-sudo tar -C /usr/local -xvf go1.13.1.linux-amd64.tar.gz
+# Skip tailscale because of potential conflicts
+#sudo apt-get install tailscale sbt
+#sudo tailscale up
+wget https://dl.google.com/go/go1.16.5.linux-amd64.tar.gz
+sudo tar -C /usr/local -xvf go1.16.5.linux-amd64.tar.gz
 sudo pip install Pygments sphinx pypandoc mkdocs &
 sudo gem2.3 install jekyll pygments.rb &
 sudo Rscript -e 'install.packages(c("knitr", "devtools", "roxygen2", "testthat", "rmarkdown"), repos="http://cran.stat.ucla.edu/")' &
@@ -45,7 +59,7 @@ gem install jekyll pygments.rb &
 #     --pkgversion="$(date +%Y%m%d)-git" --deldoc=yes
 #popd
 #popd
-mkdir ~/bin
+mkdir -p ~/bin
 pushd /tmp
 wget https://github.com/ksonnet/ksonnet/releases/download/v0.9.1/ks_0.9.1_linux_amd64.tar.gz
 tar -xvf ks_0.9.1_linux_amd64.tar.gz
