@@ -15,15 +15,14 @@
 (require 'cl)
 
 (setq package-archives '(("gnu" . "http://elpa.gnu.org/packages/")
-                         ("marmalade" . "http://marmalade-repo.org/packages/")
-                         ("melpa" . "http://melpa.milkbox.net/packages/")))
-(package-initialize)
+                         ("melpa" . "https://melpa.org/packages/")))
+;;(package-initialize)
 
 (when (not package-archive-contents)
   (package-refresh-contents))
 ;;(setq package-list '(ensime magit find-things-fast scala-mode2 adoc-mode))
 ;;(setq package-list '(magit find-things-fast adoc-mode ensime))
-(setq package-list '(magit find-things-fast adoc-mode go-mode flycheck jsonnet-mode use-package lsp-mode lsp-ui sbt-mode yaml-mode yasnippet markdown-mode dockerfile-mode))
+(setq package-list '(magit find-things-fast adoc-mode go-mode flycheck jsonnet-mode use-package lsp-mode lsp-ui sbt-mode yaml-mode yasnippet markdown-mode dockerfile-mode lsp-java))
 (package-initialize)
 ;; Fetch package list
 (unless package-archive-contents
@@ -88,8 +87,8 @@
 (add-hook 'adoc-mode-hook (lambda ()
 			     (flyspell-mode 1)))
 ;; Load ensime
-(require 'ensime)
-(add-hook 'scala-mode-hook 'ensime-scala-mode-hook)
+;;(require 'ensime)
+;;(add-hook 'scala-mode-hook 'ensime-scala-mode-hook)
 
 ;; clojure crap
 (unless (package-installed-p 'company)
@@ -128,3 +127,17 @@
 (setq tramp-default-method "ssh")
 ;; Highlight wasn't super visible on this machine
 (set-face-attribute 'region nil :background "#999")
+(use-package lsp-mode
+  ;; Enable lsp for scala
+  :hook (scala-mode . lsp)
+  :config (setq lsp-prefer-flymake nil))
+(use-package lsp-ui)
+(add-hook 'scala-mode-hook
+	  '(lambda ()
+	     (local-set-key "\M-d" 'lsp-find-definition)
+	     ))
+(add-hook 'java-mode-hook
+	  '(lambda ()
+	     (local-set-key "\M-d" 'lsp-find-definition)
+	     ))
+(add-hook 'java-mode-hook #'lsp)

@@ -113,7 +113,6 @@ yasm
 libfile-slurp-perl
 jq
 emacs-gtk
-balena-etcher-electron
 libdbus-1-dev
 libusb-1.0-0-dev
 make

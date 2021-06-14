@@ -1,7 +1,7 @@
 set -x
 set -e
 # Install etcher
-echo "deb https://deb.etcher.io stable etcher" | sudo tee /etc/apt/sources.list.d/balena-etcher.list
+#echo "deb https://deb.etcher.io stable etcher" | sudo tee /etc/apt/sources.list.d/balena-etcher.list
 sudo add-apt-repository -y ppa:apt-fast/stable
 sudo apt-get update
 sudo apt-get -y install apt-fast
