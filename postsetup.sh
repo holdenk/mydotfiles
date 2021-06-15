@@ -1,17 +1,20 @@
 # Checkout all of my repos
+set -x
 mkdir -p ~/repos
 pushd ~/repos
 CNTX=users; NAME=holdenk;
-for PAGE in 1 2 3; do
-  REPOS = $(curl "https://api.github.com/$CNTX/$NAME/repos?page=$PAGE&per_page=100" |
-              grep -e 'git_url*' |
- 	      cut -d \" -f 4)
-  for REPO in ${REPOS}; do 
+for PAGE in {1..5}; do
+  REPOS=$(curl "https://api.github.com/$CNTX/$NAME/repos?page=$PAGE&per_page=100" |
+            grep -e 'git_url*' |
+ 	    cut -d \" -f 4)
+  for REPO in ${REPOS[@]}; do 
     git clone $REPO || echo "Already cloned $REPO"
   done
 done
 popd
 set -ex
+# More bluetooth stuff
+sudo apt-get install bluez*
 #tailscale
 echo 'net.ipv4.ip_forward = 1' | sudo tee -a /etc/sysctl.conf
 
