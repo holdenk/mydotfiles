@@ -89,6 +89,8 @@ libfile-slurp-perl
 jq
 balena-etcher-electron
 emacs-gtk
+libavahi-compat-libdnssd-dev
+libxtst-dev
 libdbus-1-dev
 libusb-1.0-0-dev
 make
