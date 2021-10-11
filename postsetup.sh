@@ -1,5 +1,21 @@
 #!/bin/bash
+# Checkout all of my repos
+set -x
+mkdir -p ~/repos
+pushd ~/repos
+CNTX=users; NAME=holdenk;
+for PAGE in {1..5}; do
+  REPOS=$(curl "https://api.github.com/$CNTX/$NAME/repos?page=$PAGE&per_page=100" |
+            grep -e 'git_url*' |
+ 	    cut -d \" -f 4)
+  for REPO in ${REPOS[@]}; do 
+    git clone $REPO || echo "Already cloned $REPO"
+  done
+done
+popd
 set -ex
+# More bluetooth stuff
+sudo apt-get install bluez*
 #tailscale
 echo 'net.ipv4.ip_forward = 1' | sudo tee -a /etc/sysctl.conf
 
@@ -24,10 +40,11 @@ curl https://pkgs.tailscale.com/stable/ubuntu/focal.gpg | sudo apt-key add -
 curl https://pkgs.tailscale.com/stable/ubuntu/focal.list | sudo tee /etc/apt/sources.list.d/tailscale.list
 echo "deb https://dl.bintray.com/sbt/debian /" | sudo tee -a /etc/apt/sources.list.d/sbt.list
 sudo apt-get update
-sudo apt-get install tailscale sbt
-if [ -z "$SERVER" ]; then
-   sudo tailscale up
-fi
+# Skip tailscale because of potential conflicts
+#sudo apt-get install tailscale sbt
+#if [ -z "$SERVER" ]; then
+#   sudo tailscale up
+#fi
 wget https://dl.google.com/go/go1.13.1.linux-amd64.tar.gz
 sudo tar -C /usr/local -xvf go1.13.1.linux-amd64.tar.gz
 sudo pip install Pygments sphinx pypandoc mkdocs &
