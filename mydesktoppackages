@@ -22,6 +22,5 @@ libxinerama-dev
 qt5-qmake
 qtbase5-dev
 qtbase5-dev-tools
-x11proto-composite-dev
 x11proto-xinerama-dev
 emacs-gtk
