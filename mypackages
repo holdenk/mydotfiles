@@ -27,6 +27,7 @@ gnupg2
 gpgv2
 graphviz
 graphviz
+golang-go
 htop
 iftop
 irssi
@@ -107,3 +108,4 @@ whois
 yasm
 zip
 zlib1g-dev
+lib32z1
