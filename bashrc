@@ -149,3 +149,4 @@ export PATH=$PATH:$GOHOME/bin:~/bin:/usr/local/go/bin
 # OS X colourize ls
 alias ls='ls -G'
 alias ll='ls -lG'
+export PATH=/opt/conda/bin:/opt/conda/condabin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/home/holden/.local/bin/:~/.local/bin/:$PATH
