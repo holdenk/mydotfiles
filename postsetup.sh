@@ -100,4 +100,7 @@ fi
 GH_USER=${GH_USER:-holdenk}
 curl https://github.com/${GH_USER}.keys | ${RUN_DEST_CMD} tee -a ~/authorized_keys
 # TODO: Disable password login
-
+wget https://download.brother.com/welcome/dlf006893/linux-brprinter-installer-2.2.3-1.gz
+gunzip linux-brprinter-installer-2.2.3-1.gz
+chmod a+x linux-brprinter-installer-2.2.3-1
+./linux-brprinter-installer-2.2.3-1.gz
