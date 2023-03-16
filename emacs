@@ -22,7 +22,7 @@
   (package-refresh-contents))
 ;;(setq package-list '(ensime magit find-things-fast scala-mode2 adoc-mode))
 ;;(setq package-list '(magit find-things-fast adoc-mode ensime))
-(setq package-list '(magit find-things-fast adoc-mode go-mode flycheck jsonnet-mode use-package lsp-mode lsp-ui sbt-mode yaml-mode yasnippet markdown-mode dockerfile-mode lsp-java))
+(setq package-list '(magit find-things-fast adoc-mode go-mode flycheck jsonnet-mode use-package lsp-mode lsp-ui sbt-mode yaml-mode yasnippet markdown-mode dockerfile-mode lsp-java quelpa-use-package))
 (package-initialize)
 ;; Fetch package list
 (unless package-archive-contents
@@ -141,3 +141,18 @@
 	     (local-set-key "\M-d" 'lsp-find-definition)
 	     ))
 (add-hook 'java-mode-hook #'lsp)
+
+
+;; Magit over tramp hacks?
+(setq magit-process-connection-type t)
+(global-set-key (kbd "C-x p") 'project-find-file)
+;; Sup?
+
+(require 'quelpa-use-package)
+
+(use-package copilot
+  :quelpa (copilot.el :fetcher github
+                      :repo "zerolfx/copilot.el"
+                      :branch "main"
+                      :files ("dist" "*.el")))
+;; you can utilize :map :hook and :config to customize copilot

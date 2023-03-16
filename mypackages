@@ -1,3 +1,6 @@
+meson
+libpolkit-gobject-1-dev 
+libudev-dev
 net-tools
 qemu-user-static
 binfmt-support
