@@ -1,8 +1,3 @@
-meson
-libpolkit-gobject-1-dev
-libudev-dev
-net-tools
-qemu-user-static
 alien
 ansible
 aria2
@@ -29,15 +24,16 @@ gfortran-doc
 git
 git-core
 gnupg2
+golang-go
 gpgv2
 graphviz
 graphviz
-golang-go
 htop
 iftop
 irssi
 jq
 lib32ncurses5-dev
+lib32z1
 lib32z1
 libavahi-compat-libdnssd-dev
 libbluetooth-dev
@@ -57,8 +53,10 @@ libpcap0.8-dev
 libpcap-dev
 libpcap-dev
 libpcre3-dev
+libpolkit-gobject-1-dev
 librhash0
 libsqlite3-dev
+libudev-dev
 libudev-dev
 libusb-1.0-0-dev
 libuv1
@@ -66,6 +64,8 @@ libxtst-dev
 make
 make
 maven
+meson
+net-tools
 net-tools
 nmap
 openjdk-11-jdk
@@ -88,6 +88,7 @@ python3-dev
 python3-pip
 python3-virtualenv
 python3-wheel
+qemu-user-static
 qemu-user-static
 rbenv
 r-cran-rsqlite
@@ -113,4 +114,3 @@ whois
 yasm
 zip
 zlib1g-dev
-lib32z1
