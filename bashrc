@@ -129,7 +129,7 @@ book(){
     LINK=$(echo $O | cut -d ">" -f 2)
     xdg-open $LINK
 }
-export JAVA_HOME=/usr/lib/jvm/java-8-openjdk-amd64
+# export JAVA_HOME=/usr/lib/jvm/java-8-openjdk-amd64
 
 
 # The next line updates PATH for the Google Cloud SDK.
@@ -138,7 +138,9 @@ if [ -f '/home/holden/Downloads/google-cloud-sdk/path.bash.inc' ]; then . '/home
 # The next line enables shell command completion for gcloud.
 if [ -f '/home/holden/Downloads/google-cloud-sdk/completion.bash.inc' ]; then . '/home/holden/Downloads/google-cloud-sdk/completion.bash.inc'; fi
 
-export GOROOT=/usr/local/go
+if [ -f /usr/local/go ]; then
+   export GOROOT=/usr/local/go
+fi
 export GOHOME=~/go
 export GOPATH=$GOHOME
 export PATH=$PATH:$GOHOME/bin:~/bin:/usr/local/go/bin
@@ -147,3 +149,4 @@ export PATH=$PATH:$GOHOME/bin:~/bin:/usr/local/go/bin
 # OS X colourize ls
 alias ls='ls -G'
 alias ll='ls -lG'
+export PATH=/opt/conda/bin:/opt/conda/condabin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/home/holden/.local/bin/:~/.local/bin/:$PATH

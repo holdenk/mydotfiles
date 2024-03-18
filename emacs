@@ -15,26 +15,26 @@
 (require 'cl)
 
 (setq package-archives '(("gnu" . "http://elpa.gnu.org/packages/")
-                         ("melpa" . "https://melpa.org/packages/")))
+			 ("melpa" . "https://melpa.org/packages/")))
 ;;(package-initialize)
 
-(when (not package-archive-contents)
-  (package-refresh-contents))
+;;(when (not package-archive-contents)
+;;  (package-refresh-contents))
 ;;(setq package-list '(ensime magit find-things-fast scala-mode2 adoc-mode))
 ;;(setq package-list '(magit find-things-fast adoc-mode ensime))
-(setq package-list '(magit find-things-fast adoc-mode go-mode flycheck jsonnet-mode use-package lsp-mode lsp-ui sbt-mode yaml-mode yasnippet markdown-mode dockerfile-mode lsp-java quelpa-use-package))
-(package-initialize)
+(setq package-list '(magit find-things-fast adoc-mode go-mode flycheck jsonnet-mode use-package lsp-mode lsp-ui sbt-mode yaml-mode yasnippet markdown-mode dockerfile-mode lsp-java rust-mode typescript-mode  quelpa-use-package editorconfig))
+;;(package-initialize)
 ;; Fetch package list
-(unless package-archive-contents
-  (package-refresh-contents))
+;;(unless package-archive-contents
+;;  (package-refresh-contents))
 ;; Install the missing packages
 (dolist (package package-list)
   (unless (package-installed-p package)
     (package-install package)))
 ;; Shell Hook
 (add-hook 'sh-mode-hook
-          (function (lambda ()
-                      (setq sh-basic-offset 2
+	  (function (lambda ()
+		      (setq sh-basic-offset 2
 			    sh-indentation 2))))
 ;; Load sbt mode
 (unless (package-installed-p 'sbt-mode)
@@ -52,7 +52,7 @@
 (add-hook 'scala-mode-hook (function (lambda ()
 				       (local-set-key (kbd "RET") 'newline-and-indent)
 				       (make-local-variable 'before-save-hook)
-				       (add-hook 'before-save-hook 'whitespace-cleanup)
+				       (add-hook 'before-save-hook 'whitespace-cleanup nil t)
 				       ;; trailing whitespace
 				       (c-set-offset 'arglist-intro 4)
 				       (local-set-key (kbd "RET")
@@ -64,7 +64,7 @@
 ;; Enable transient mark mode
 (transient-mark-mode 1)
 ;; Java mode settings
-(add-hook 'java-mode-hook (function 
+(add-hook 'java-mode-hook (function
 			   (lambda ()
 			     (local-set-key (kbd "RET") 'newline-and-indent)
 			     ;; indentation
@@ -148,11 +148,28 @@
 (global-set-key (kbd "C-x p") 'project-find-file)
 ;; Sup?
 
+(add-hook 'nxml-mode-hook #'lsp)
+
+(setq magit-process-connection-type t)
+(global-set-key (kbd "C-x p") 'project-find-file)
+
+(require 'rust-mode)
+
 (require 'quelpa-use-package)
 
 (use-package copilot
   :quelpa (copilot.el :fetcher github
-                      :repo "zerolfx/copilot.el"
-                      :branch "main"
-                      :files ("dist" "*.el")))
-;; you can utilize :map :hook and :config to customize copilot
+		      :repo "zerolfx/copilot.el"
+		      :branch "main"
+		      :files ("dist" "*.el")))
+
+(define-key copilot-mode-map (kbd "M-<next>") #'copilot-next-completion)
+(define-key copilot-mode-map (kbd "M-<prior>") #'copilot-previous-completion)
+(define-key copilot-mode-map (kbd "M-<right>") #'copilot-accept-completion-by-word)
+(define-key copilot-mode-map (kbd "M-<down>") #'copilot-accept-completion-by-line)
+(setq warning-minimum-level :emergency)
+(setq lsp-xml-format-enabled nil)
+(add-hook 'xml-mode-hook
+	  (lambda ()
+	     (add-hook 'electric-indent-functions
+			    (lambda () 'no-indent) nil 'local)))

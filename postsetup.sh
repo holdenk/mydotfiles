@@ -1,3 +1,4 @@
+#!/bin/bash
 # Checkout all of my repos
 set -x
 mkdir -p ~/repos
@@ -18,19 +19,21 @@ sudo apt-get install bluez*
 #tailscale
 echo 'net.ipv4.ip_forward = 1' | sudo tee -a /etc/sysctl.conf
 
-# NOTE: These instructions only work for 64 bit Debian-based
-# Linux distributions such as Ubuntu, Mint etc.
+if [ -z "$SERVER" ]; then
+ # NOTE: These instructions only work for 64 bit Debian-based
+ # Linux distributions such as Ubuntu, Mint etc.
 
-# 1. Install our official public software signing key
-wget -O- https://updates.signal.org/desktop/apt/keys.asc |\
-  sudo apt-key add -
+ # 1. Install our official public software signing key
+ wget -O- https://updates.signal.org/desktop/apt/keys.asc |\
+   sudo apt-key add -
 
-# 2. Add our repository to your list of repositories
-echo "deb [arch=amd64] https://updates.signal.org/desktop/apt xenial main" |\
-  sudo tee -a /etc/apt/sources.list.d/signal-xenial.list
+   # 2. Add our repository to your list of repositories
+   echo "deb [arch=amd64] https://updates.signal.org/desktop/apt xenial main" |\
+   sudo tee -a /etc/apt/sources.list.d/signal-xenial.list
 
-# 3. Update your package database and install signal
-sudo apt update && sudo apt install signal-desktop
+   # 3. Update your package database and install signal
+   sudo apt update && sudo apt install signal-desktop
+fi
 
 curl -sL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x2EE0EA64E40A89B84B2DF73499E82A75642AC823" | sudo apt-key add
 curl https://pkgs.tailscale.com/stable/ubuntu/focal.gpg | sudo apt-key add -
@@ -39,9 +42,11 @@ echo "deb https://dl.bintray.com/sbt/debian /" | sudo tee -a /etc/apt/sources.li
 sudo apt-get update
 # Skip tailscale because of potential conflicts
 #sudo apt-get install tailscale sbt
-#sudo tailscale up
-wget https://dl.google.com/go/go1.16.5.linux-amd64.tar.gz
-sudo tar -C /usr/local -xvf go1.16.5.linux-amd64.tar.gz
+#if [ -z "$SERVER" ]; then
+#   sudo tailscale up
+#fi
+wget https://dl.google.com/go/go1.13.1.linux-amd64.tar.gz
+sudo tar -C /usr/local -xvf go1.13.1.linux-amd64.tar.gz
 sudo pip install Pygments sphinx pypandoc mkdocs &
 sudo gem2.3 install jekyll pygments.rb &
 sudo Rscript -e 'install.packages(c("knitr", "devtools", "roxygen2", "testthat", "rmarkdown"), repos="http://cran.stat.ucla.edu/")' &
@@ -62,30 +67,40 @@ gem install jekyll pygments.rb &
 #     --pkgversion="$(date +%Y%m%d)-git" --deldoc=yes
 #popd
 #popd
-mkdir -p ~/bin
-pushd /tmp
-wget https://github.com/ksonnet/ksonnet/releases/download/v0.9.1/ks_0.9.1_linux_amd64.tar.gz
-tar -xvf ks_0.9.1_linux_amd64.tar.gz
-mv ks_0.9.1_linux_amd64/ks ~/bin/
-popd
-# Bluez
-mkdir -p /tmp/bluez
-pushd /tmp/bluez
-wget http://www.kernel.org/pub/linux/bluetooth/bluez-5.54.tar.xz
-tar -xvf bluez-5.54.tar.xz
-cd bluez-5.54
-./configure
-make
-sudo make install
-mkdir -p /tmp/libbtbb
-pushd /tmp/libbtbb
-wget https://github.com/greatscottgadgets/libbtbb/archive/2018-12-R1.tar.gz -O libbtbb-2018-12-R1.tar.gz
-tar xf libbtbb-2018-12-R1.tar.gz
-cd libbtbb-2018-12-R1
-export ENABLE_PYTHON=true
-mkdir build
-cd build
-cmake ..
-make
-sudo make install
-sudo ldconfig
+mkdir ~/bin
+if [ -z "$SERVER" ]; then
+   pushd /tmp
+   wget https://github.com/ksonnet/ksonnet/releases/download/v0.9.1/ks_0.9.1_linux_amd64.tar.gz
+   tar -xvf ks_0.9.1_linux_amd64.tar.gz
+   mv ks_0.9.1_linux_amd64/ks ~/bin/
+   popd
+   # Bluez
+   mkdir -p /tmp/bluez
+   pushd /tmp/bluez
+   wget http://www.kernel.org/pub/linux/bluetooth/bluez-5.54.tar.xz
+   tar -xvf bluez-5.54.tar.xz
+   cd bluez-5.54
+   ./configure
+   make
+   sudo make install
+   mkdir -p /tmp/libbtbb
+   pushd /tmp/libbtbb
+   wget https://github.com/greatscottgadgets/libbtbb/archive/2018-12-R1.tar.gz -O libbtbb-2018-12-R1.tar.gz
+   tar xf libbtbb-2018-12-R1.tar.gz
+   cd libbtbb-2018-12-R1
+   export ENABLE_PYTHON=true
+   mkdir build
+   cd build
+   cmake ..
+   make
+   sudo make install
+   sudo ldconfig
+fi
+# ssh keys
+GH_USER=${GH_USER:-holdenk}
+curl https://github.com/${GH_USER}.keys | ${RUN_DEST_CMD} tee -a ~/authorized_keys
+# TODO: Disable password login
+wget https://download.brother.com/welcome/dlf006893/linux-brprinter-installer-2.2.3-1.gz
+gunzip linux-brprinter-installer-2.2.3-1.gz
+chmod a+x linux-brprinter-installer-2.2.3-1
+./linux-brprinter-installer-2.2.3-1.gz
