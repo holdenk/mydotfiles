@@ -142,7 +142,6 @@
 	     ))
 (add-hook 'java-mode-hook #'lsp)
 
-
 ;; Magit over tramp hacks?
 (setq magit-process-connection-type t)
 (global-set-key (kbd "C-x p") 'project-find-file)
@@ -159,17 +158,6 @@
 
 (use-package copilot
   :quelpa (copilot.el :fetcher github
-		      :repo "zerolfx/copilot.el"
-		      :branch "main"
-		      :files ("dist" "*.el")))
-
-(define-key copilot-mode-map (kbd "M-<next>") #'copilot-next-completion)
-(define-key copilot-mode-map (kbd "M-<prior>") #'copilot-previous-completion)
-(define-key copilot-mode-map (kbd "M-<right>") #'copilot-accept-completion-by-word)
-(define-key copilot-mode-map (kbd "M-<down>") #'copilot-accept-completion-by-line)
-(setq warning-minimum-level :emergency)
-(setq lsp-xml-format-enabled nil)
-(add-hook 'xml-mode-hook
-	  (lambda ()
-	     (add-hook 'electric-indent-functions
-			    (lambda () 'no-indent) nil 'local)))
+                      :repo "zerolfx/copilot.el"
+                      :branch "main"
+                      :files ("dist" "*.el")))
