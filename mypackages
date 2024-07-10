@@ -114,3 +114,5 @@ whois
 yasm
 zip
 zlib1g-dev
+git-filter-repo
+qpdf

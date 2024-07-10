@@ -154,6 +154,8 @@
 
 (require 'rust-mode)
 
+(require 'rust-mode)
+
 (require 'quelpa-use-package)
 
 (use-package copilot
