@@ -38,19 +38,8 @@ fi
 
 curl -sL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x2EE0EA64E40A89B84B2DF73499E82A75642AC823" | gpg --dearmor | sudo tee /usr/share/keyrings/scalasbt-release.gpg > /dev/null
 
-# Tailscale repository setup with version detection
-UBUNTU_CODENAME=$(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
-# Tailscale uses the generic codename for newer versions not yet explicitly supported
-# Try the current codename first, fall back to 'noble' for Ubuntu 25.10+ if not available
-if curl -f -s -I --connect-timeout 10 --max-time 30 "https://pkgs.tailscale.com/stable/ubuntu/${UBUNTU_CODENAME}/Release" > /dev/null 2>&1; then
-  TAILSCALE_CODENAME=$UBUNTU_CODENAME
-else
-  # Fall back to noble (24.04) for newer versions
-  TAILSCALE_CODENAME="noble"
-fi
-
-curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/${TAILSCALE_CODENAME}.noarmor.gpg | sudo tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null || { echo 'Warning: Failed to download Tailscale keyring'; }
-curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/${TAILSCALE_CODENAME}.tailscale-keyring.list | sudo tee /etc/apt/sources.list.d/tailscale.list || { echo 'Warning: Failed to download Tailscale list'; }
+# Tailscale installation using official install script
+curl -fsSL https://tailscale.com/install.sh | sh
 echo "deb https://dl.bintray.com/sbt/debian /" | sudo tee -a /etc/apt/sources.list.d/sbt.list
 sudo apt-get update
 # Skip tailscale because of potential conflicts
