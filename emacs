@@ -439,7 +439,7 @@
  '(package-selected-packages
    '(lsp-pyright lsp-latex lsp-mssql 0blayout editorconfig copilot.el
 		 quelpa-use-package typescript-mode cargo-mode
-		 flycheck-rust ## rust-mode cider company lsp-java
+		 flycheck-rust rust-mode cider company lsp-java
 		 dockerfile-mode yasnippet yaml-mode sbt-mode lsp-ui
 		 lsp-mode use-package jsonnet-mode flycheck go-mode
 		 adoc-mode find-things-fast magit scala-mode
