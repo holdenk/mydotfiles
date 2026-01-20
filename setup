@@ -112,7 +112,6 @@ export arch=$(uname -m)
 if [ "$arch" == "aarm64" ]; then
   arch="arm64";
 fi
-
 # Check if conda already exists and upgrade it if present
 if [ -d "/opt/conda" ] && [ -x "/opt/conda/bin/conda" ]; then
   echo "Conda already exists, upgrading..."
@@ -120,7 +119,7 @@ if [ -d "/opt/conda" ] && [ -x "/opt/conda/bin/conda" ]; then
   sudo /opt/conda/bin/conda update --all --yes
 else
   echo "Installing conda..."
-  wget --quiet https://github.com/conda-forge/miniforge/releases/download/4.8.5-1/Miniforge3-4.8.5-1-Linux-${arch}.sh -O ~/miniforge.sh
+  wget --quiet https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-${arch}.sh -O ~/miniforge.sh
   chmod a+x ~/miniforge.sh
   sudo ~/miniforge.sh -b -p /opt/conda
   sudo /opt/conda/bin/conda clean -tipsy
