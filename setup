@@ -160,7 +160,7 @@ sudo apt-fast install -y \
 
 # Install in each Python version environment if they exist
 for env in py310 py311 py312; do
-    if /opt/conda/bin/conda env list | grep -q "^${env} "; then
+    if /opt/conda/bin/conda info --envs | awk '{print $1}' | grep -x "$env" > /dev/null 2>&1; then
         /opt/conda/bin/conda run -n $env pip install -r spark_req.txt
     else
         echo "Environment $env does not exist, skipping..."
