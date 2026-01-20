@@ -1,7 +1,15 @@
 #!/bin/bash
 set -ex
 
+# Install Python 3.8.6 in base environment (keep for backwards compatibility)
 mamba install --yes python==3.8.6
+
+# Install modern Python versions as separate environments
+# To use: conda activate py310 (or py311/py312)
+echo "Installing modern Python versions..."
+mamba create --yes -n py310 python=3.10
+mamba create --yes -n py311 python=3.11
+mamba create --yes -n py312 python=3.12
 mamba install --yes \
     cytoolz \
     dask==2022.5.0 \
