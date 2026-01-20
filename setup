@@ -122,8 +122,6 @@ else
   wget --quiet https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-${arch}.sh -O ~/miniforge.sh
   chmod a+x ~/miniforge.sh
   sudo ~/miniforge.sh -b -p /opt/conda
-  sudo /opt/conda/bin/conda clean -tipsy
-  sudo ln -s /opt/conda/etc/profile.d/conda.sh /etc/profile.d/conda.sh
   echo ". /opt/conda/etc/profile.d/conda.sh" >> ~/.bashrc
   echo ". /opt/conda/etc/profile.d/conda.sh" | sudo tee -a ~/.bashrc
   echo "conda activate base" >> ~/.bashrc
