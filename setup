@@ -156,11 +156,15 @@ sudo apt-fast install -y \
 
 # Install remaining Spark packages (pyspark, py4j, findspark) into conda environments
 # Install in base environment
-sudo /opt/conda/bin/pip install -r spark_req.txt
+/opt/conda/bin/pip install -r spark_req.txt
 
-# Install in each Python version environment
+# Install in each Python version environment if they exist
 for env in py310 py311 py312; do
-    sudo /opt/conda/bin/conda run -n $env pip install -r spark_req.txt
+    if /opt/conda/bin/conda env list | grep -q "^${env} "; then
+        /opt/conda/bin/conda run -n $env pip install -r spark_req.txt
+    else
+        echo "Environment $env does not exist, skipping..."
+    fi
 done
 
 # Add user to docker
