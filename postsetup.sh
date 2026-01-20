@@ -42,15 +42,15 @@ curl -sL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x2EE0EA64E40A89
 UBUNTU_CODENAME=$(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
 # Tailscale uses the generic codename for newer versions not yet explicitly supported
 # Try the current codename first, fall back to 'noble' for Ubuntu 25.10+ if not available
-if curl -f -s -I "https://pkgs.tailscale.com/stable/ubuntu/${UBUNTU_CODENAME}/Release" > /dev/null 2>&1; then
+if curl -f -s -I --connect-timeout 10 --max-time 30 "https://pkgs.tailscale.com/stable/ubuntu/${UBUNTU_CODENAME}/Release" > /dev/null 2>&1; then
   TAILSCALE_CODENAME=$UBUNTU_CODENAME
 else
   # Fall back to noble (24.04) for newer versions
   TAILSCALE_CODENAME="noble"
 fi
 
-curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/${TAILSCALE_CODENAME}.noarmor.gpg | sudo tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
-curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/${TAILSCALE_CODENAME}.tailscale-keyring.list | sudo tee /etc/apt/sources.list.d/tailscale.list
+curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/${TAILSCALE_CODENAME}.noarmor.gpg | sudo tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null || { echo 'Warning: Failed to download Tailscale keyring'; }
+curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/${TAILSCALE_CODENAME}.tailscale-keyring.list | sudo tee /etc/apt/sources.list.d/tailscale.list || { echo 'Warning: Failed to download Tailscale list'; }
 echo "deb https://dl.bintray.com/sbt/debian /" | sudo tee -a /etc/apt/sources.list.d/sbt.list
 sudo apt-get update
 # Skip tailscale because of potential conflicts
@@ -62,8 +62,15 @@ wget https://dl.google.com/go/go1.13.1.linux-amd64.tar.gz
 sudo tar -C /usr/local -xvf go1.13.1.linux-amd64.tar.gz
 sudo pip install Pygments sphinx pypandoc mkdocs &
 
-# Try to find available gem version (try gem first, then fall back to specific versions)
-GEM_CMD=$(command -v gem || command -v gem2.7 || command -v gem2.5 || command -v gem2.3 || echo "")
+# Try to find available gem version dynamically
+GEM_CMD=""
+for gem_path in /usr/bin/gem*; do
+  if [ -x "$gem_path" ]; then
+    GEM_CMD="$gem_path"
+    break
+  fi
+done
+
 if [ -n "$GEM_CMD" ]; then
   sudo $GEM_CMD install jekyll pygments.rb &
 else
