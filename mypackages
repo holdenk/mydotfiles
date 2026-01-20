@@ -14,7 +14,6 @@ editorconfig
 elfutils
 emacs-gtk
 emacs-gtk
-ffmpeg2theora
 g++
 g++
 gcc
@@ -26,15 +25,12 @@ git
 git-core
 gnupg2
 golang-go
-gpgv2
 graphviz
 graphviz
 htop
 iftop
 irssi
 jq
-lib32ncurses5-dev
-lib32z1
 lib32z1
 libavahi-compat-libdnssd-dev
 libbluetooth-dev
@@ -55,7 +51,6 @@ libpcap-dev
 libpcap-dev
 libpcre3-dev
 libpolkit-gobject-1-dev
-librhash0
 libsqlite3-dev
 libudev-dev
 libudev-dev
@@ -99,9 +94,7 @@ scala
 scala-mode-el
 screen
 sed
-sqlite
 sqlite3
-sqlite3-pcre
 strace
 strongswan
 texlive-latex-extra
