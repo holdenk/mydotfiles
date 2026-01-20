@@ -12,10 +12,16 @@ on:
       - 'emacs'
       - '.github/workflows/test-emacs.yml'
 
+# Set minimal permissions for security
+permissions:
+  contents: read
+
 jobs:
   test-emacs-linux:
     name: Test on Ubuntu with Emacs ${{ matrix.emacs_version }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       matrix:
         emacs_version: ['29.4', 'snapshot']  # snapshot = latest development version
@@ -80,6 +86,8 @@ jobs:
   test-emacs-macos:
     name: Test on macOS
     runs-on: macos-latest
+    permissions:
+      contents: read
     
     steps:
     - name: Checkout repository
@@ -127,6 +135,8 @@ jobs:
   lint-emacs-config:
     name: Lint Emacs Configuration
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     
     steps:
     - name: Checkout repository
