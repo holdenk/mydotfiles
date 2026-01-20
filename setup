@@ -31,9 +31,66 @@ EOF
 
 sudo apt-fast update && sudo apt-get -y upgrade
 sudo apt-get install -y docker-ce docker-ce-cli containerd.io
-sudo apt-fast install -y `cat mypackages`
+
+# Install packages from mypackages with graceful fallback
+echo "Checking package availability from mypackages..."
+AVAILABLE_PACKAGES=""
+SKIPPED_PACKAGES=""
+
+while IFS= read -r package; do
+  # Skip empty lines and comments
+  [[ -z "$package" || "$package" =~ ^[[:space:]]*# ]] && continue
+  
+  # Check if package is available in apt cache
+  if apt-cache show "$package" > /dev/null 2>&1; then
+    AVAILABLE_PACKAGES="$AVAILABLE_PACKAGES $package"
+  else
+    echo "Warning: Package $package not found in repositories, skipping..."
+    SKIPPED_PACKAGES="$SKIPPED_PACKAGES $package"
+  fi
+done < mypackages
+
+# Write skipped packages to a file
+if [ -n "$SKIPPED_PACKAGES" ]; then
+  echo "$SKIPPED_PACKAGES" | tr ' ' '\n' | grep -v '^$' > /tmp/skipped_packages.txt
+  echo "Skipped packages written to /tmp/skipped_packages.txt"
+fi
+
+# Install all available packages at once with apt-fast for parallelism
+if [ -n "$AVAILABLE_PACKAGES" ]; then
+  echo "Installing available packages with apt-fast..."
+  sudo apt-fast install -y $AVAILABLE_PACKAGES
+fi
+
 if [ -z "$SERVER" ]; then
-   sudo apt-fast install -y `cat mydesktoppackages`
+   echo "Checking desktop package availability from mydesktoppackages..."
+   AVAILABLE_DESKTOP_PACKAGES=""
+   SKIPPED_DESKTOP_PACKAGES=""
+   
+   while IFS= read -r package; do
+     # Skip empty lines and comments
+     [[ -z "$package" || "$package" =~ ^[[:space:]]*# ]] && continue
+     
+     # Check if package is available in apt cache
+     if apt-cache show "$package" > /dev/null 2>&1; then
+       AVAILABLE_DESKTOP_PACKAGES="$AVAILABLE_DESKTOP_PACKAGES $package"
+     else
+       echo "Warning: Package $package not found in repositories, skipping..."
+       SKIPPED_DESKTOP_PACKAGES="$SKIPPED_DESKTOP_PACKAGES $package"
+     fi
+   done < mydesktoppackages
+   
+   # Write skipped desktop packages to a file
+   if [ -n "$SKIPPED_DESKTOP_PACKAGES" ]; then
+     echo "$SKIPPED_DESKTOP_PACKAGES" | tr ' ' '\n' | grep -v '^$' >> /tmp/skipped_packages.txt
+     echo "Skipped desktop packages written to /tmp/skipped_packages.txt"
+   fi
+   
+   # Install all available desktop packages at once with apt-fast for parallelism
+   if [ -n "$AVAILABLE_DESKTOP_PACKAGES" ]; then
+     echo "Installing available desktop packages with apt-fast..."
+     sudo apt-fast install -y $AVAILABLE_DESKTOP_PACKAGES
+   fi
 #   sudo add-apt-repository -y ppa:obsproject/obs-studio
 #   sudo apt-fast update
 #   sudo apt-fast install -y obs-studio
