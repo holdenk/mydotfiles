@@ -7,7 +7,7 @@
 (setq column-number-mode t)
 
 ;; For hi-res
-(set-face-attribute 'default nil :height 170)
+(set-face-attribute 'default nil :height 230)
 ;; Turn on debug on quit
 (setq debug-on-quit 't)
 ;; Load packages
@@ -16,36 +16,50 @@
 
 (setq package-archives '(("gnu" . "http://elpa.gnu.org/packages/")
 			 ("melpa" . "https://melpa.org/packages/")))
-;;(package-initialize)
+(unless package--initialized (package-initialize))
+(unless package-archive-contents (package-refresh-contents))
 
-;;(when (not package-archive-contents)
-;;  (package-refresh-contents))
-;;(setq package-list '(ensime magit find-things-fast scala-mode2 adoc-mode))
-;;(setq package-list '(magit find-things-fast adoc-mode ensime))
-(setq package-list '(magit find-things-fast adoc-mode go-mode flycheck jsonnet-mode use-package lsp-mode lsp-ui sbt-mode yaml-mode yasnippet markdown-mode dockerfile-mode lsp-java rust-mode typescript-mode  quelpa-use-package editorconfig))
-;;(package-initialize)
-;; Fetch package list
-;;(unless package-archive-contents
-;;  (package-refresh-contents))
+(setq package-list '(magit find-things-fast adoc-mode go-mode flycheck jsonnet-mode use-package lsp-mode lsp-latex lsp-pyright lsp-ui sbt-mode yaml-mode yasnippet markdown-mode dockerfile-mode lsp-java rust-mode typescript-mode  quelpa-use-package editorconfig scala-mode sbt-mode))
+
 ;; Install the missing packages
 (dolist (package package-list)
   (unless (package-installed-p package)
     (package-install package)))
+(setq use-package-always-ensure t)
+
+
+;; Perf knobs LSP/Metals likes
+(setq read-process-output-max (* 1024 1024)) ; 1MB
+(setq gc-cons-threshold (* 100 1024 1024))   ; 100MB
+
 ;; Shell Hook
 (add-hook 'sh-mode-hook
 	  (function (lambda ()
 		      (setq sh-basic-offset 2
 			    sh-indentation 2))))
-;; Load sbt mode
-(unless (package-installed-p 'sbt-mode)
-  (package-refresh-contents) (package-install 'sbt-mode))
+
+;; Scala stuff
+(use-package scala-mode :mode "\\.s\\(cala\\|bt\\)$")
+(use-package sbt-mode)
+(use-package lsp-mode
+  :hook ((scala-mode . lsp))
+  :custom (lsp-completion-provider :capf))
+(use-package lsp-metals
+  :after lsp-mode
+  :hook (scala-mode . lsp)
+  :custom
+  (lsp-metals-treeview-show-when-views-received t)
+  (lsp-file-watch-threshold 200000)) ;; maybe too much?
 (add-hook 'scala-mode-hook '(lambda ()
    ;; sbt-find-definitions is a command that tries to find (with grep)
    ;; the definition of the thing at point.
-   (local-set-key (kbd "M-.") 'sbt-find-definitions)
+   (local-set-key (kbd "M-d") 'sbt-find-definitions)
 
    ;; use sbt-run-previous-command to re-compile your code after changes
    (local-set-key (kbd "C-x '") 'sbt-run-previous-command)
+
+   ;; lsp mode, much better if metals is working
+   (local-set-key (kbd "M-.") #'lsp-find-definition)
 ))
 ;; scala indents
 (setq scala-indent:use-javadoc-style t)
@@ -63,7 +77,10 @@
 				       )))
 ;; Enable transient mark mode
 (transient-mark-mode 1)
+
 ;; Java mode settings
+(add-hook 'java-mode-hook (lambda () (local-set-key (kbd "M-.") #'lsp-find-definition))
+)
 (add-hook 'java-mode-hook (function
 			   (lambda ()
 			     (local-set-key (kbd "RET") 'newline-and-indent)
@@ -86,20 +103,11 @@
 			     (flyspell-prog-mode)))
 (add-hook 'adoc-mode-hook (lambda ()
 			     (flyspell-mode 1)))
-;; Load ensime
-;;(require 'ensime)
-;;(add-hook 'scala-mode-hook 'ensime-scala-mode-hook)
-
-;; clojure crap
-(unless (package-installed-p 'company)
-  (package-refresh-contents) (package-install 'company))
-(unless (package-installed-p 'magit)
-  (package-refresh-contents) (package-install 'magit))
-(unless (package-installed-p 'cider)
-  (package-refresh-contents) (package-install 'cider))
 (require 'company)
-(require 'magit)
-(global-set-key (kbd "C-x g") 'magit-status)
+
+;; magic
+(use-package transient)
+(use-package magit :after transient :bind ("C-x g" . magit-status))
 (require 'cider)
 (define-key company-active-map (kbd "M-n") nil)
 (define-key company-active-map (kbd "M-p") nil)
@@ -123,6 +131,7 @@
 
 (global-set-key (kbd "C-x t") 'ftf-find-file) ; bind to C-x t
 (setq ftf-filetypes '("*"))                   ; allow all filetypes
+(setq ftf-ignored-directories '("connector" ".git" "target"))
 ;; Tramp mode
 (setq tramp-default-method "ssh")
 ;; Highlight wasn't super visible on this machine
@@ -141,25 +150,44 @@
 	     (local-set-key "\M-d" 'lsp-find-definition)
 	     ))
 (add-hook 'java-mode-hook #'lsp)
-
-;; Magit over tramp hacks?
-(setq magit-process-connection-type t)
-(global-set-key (kbd "C-x p") 'project-find-file)
-;; Sup?
-
 (add-hook 'nxml-mode-hook #'lsp)
 
+(use-package rust-mode)
 (setq magit-process-connection-type t)
 (global-set-key (kbd "C-x p") 'project-find-file)
 
-(require 'rust-mode)
-
-(require 'rust-mode)
-
-(require 'quelpa-use-package)
-
+;; Copilot via quelpa
+(use-package quelpa-use-package)
 (use-package copilot
   :quelpa (copilot.el :fetcher github
                       :repo "zerolfx/copilot.el"
                       :branch "main"
-                      :files ("dist" "*.el")))
+                      :files ("dist" "*.el"))
+  :hook (prog-mode . copilot-mode)
+  :config
+  (define-key copilot-mode-map (kbd "M-<next>")  #'copilot-next-completion)
+  (define-key copilot-mode-map (kbd "M-<prior>") #'copilot-previous-completion)
+  (define-key copilot-mode-map (kbd "M-<right>") #'copilot-accept-completion-by-word)
+  (define-key copilot-mode-map (kbd "M-<down>")  #'copilot-accept-completion-by-line))
+
+(use-package editorconfig :config (editorconfig-mode 1))
+(custom-set-variables
+ ;; custom-set-variables was added by Custom.
+ ;; If you edit it by hand, you could mess it up, so be careful.
+ ;; Your init file should contain only one such instance.
+ ;; If there is more than one, they won't work right.
+ '(package-selected-packages
+   '(lsp-pyright lsp-latex lsp-mssql 0blayout editorconfig copilot.el
+		 quelpa-use-package typescript-mode cargo-mode
+		 flycheck-rust ## rust-mode cider company lsp-java
+		 dockerfile-mode yasnippet yaml-mode sbt-mode lsp-ui
+		 lsp-mode use-package jsonnet-mode flycheck go-mode
+		 adoc-mode find-things-fast magit scala-mode
+		 cmake-mode))
+ '(warning-suppress-types '((emacs))))
+(custom-set-faces
+ ;; custom-set-faces was added by Custom.
+ ;; If you edit it by hand, you could mess it up, so be careful.
+ ;; Your init file should contain only one such instance.
+ ;; If there is more than one, they won't work right.
+ )
