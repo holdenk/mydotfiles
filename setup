@@ -80,6 +80,9 @@ sudo chmod 644 /etc/apt/trusted.gpg.d/scalasbt-release.gpg
 sudo apt-get update
 sudo apt-get install sbt
 
+# Install Spark development tools (Python packages)
+sudo pip3 install -r spark_req.txt
+
 # Add user to docker
 sudo usermod -aG docker $USER
 

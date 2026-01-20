@@ -109,3 +109,6 @@ zip
 zlib1g-dev
 git-filter-repo
 qpdf
+r-base-dev
+gdb
+git-lfs
