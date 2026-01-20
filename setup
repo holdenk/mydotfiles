@@ -143,8 +143,25 @@ sudo chmod 644 /etc/apt/trusted.gpg.d/scalasbt-release.gpg
 sudo apt-get update
 sudo apt-get install sbt
 
-# Install Spark development tools (Python packages)
-sudo pip3 install -r spark_req.txt
+# Install Spark development tools
+# Install available Debian packages for Spark dependencies
+sudo apt-fast install -y \
+    python3-ipython \
+    python3-notebook \
+    python3-jupyter-client \
+    python3-jupyter-core \
+    python3-pandas \
+    python3-numpy \
+    python3-matplotlib
+
+# Install remaining Spark packages (pyspark, py4j, findspark) into conda environments
+# Install in base environment
+sudo /opt/conda/bin/pip install -r spark_req.txt
+
+# Install in each Python version environment
+for env in py310 py311 py312; do
+    sudo /opt/conda/bin/conda run -n $env pip install -r spark_req.txt
+done
 
 # Add user to docker
 sudo usermod -aG docker $USER
