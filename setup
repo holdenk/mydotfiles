@@ -31,9 +31,30 @@ EOF
 
 sudo apt-fast update && sudo apt-get -y upgrade
 sudo apt-get install -y docker-ce docker-ce-cli containerd.io
-sudo apt-fast install -y `cat mypackages`
+
+# Install packages from mypackages with graceful fallback
+echo "Installing packages from mypackages..."
+while IFS= read -r package; do
+  # Skip empty lines and comments
+  [[ -z "$package" || "$package" =~ ^[[:space:]]*# ]] && continue
+  
+  # Try to install the package, continue if it fails
+  if ! sudo apt-fast install -y "$package"; then
+    echo "Warning: Failed to install $package, skipping..."
+  fi
+done < mypackages
+
 if [ -z "$SERVER" ]; then
-   sudo apt-fast install -y `cat mydesktoppackages`
+   echo "Installing desktop packages from mydesktoppackages..."
+   while IFS= read -r package; do
+     # Skip empty lines and comments
+     [[ -z "$package" || "$package" =~ ^[[:space:]]*# ]] && continue
+     
+     # Try to install the package, continue if it fails
+     if ! sudo apt-fast install -y "$package"; then
+       echo "Warning: Failed to install $package, skipping..."
+     fi
+   done < mydesktoppackages
 #   sudo add-apt-repository -y ppa:obsproject/obs-studio
 #   sudo apt-fast update
 #   sudo apt-fast install -y obs-studio

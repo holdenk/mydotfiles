@@ -25,19 +25,32 @@ if [ -z "$SERVER" ]; then
 
  # 1. Install our official public software signing key
  wget -O- https://updates.signal.org/desktop/apt/keys.asc |\
-   sudo apt-key add -
+   gpg --dearmor | sudo tee /usr/share/keyrings/signal-desktop-keyring.gpg > /dev/null
 
    # 2. Add our repository to your list of repositories
-   echo "deb [arch=amd64] https://updates.signal.org/desktop/apt xenial main" |\
-   sudo tee -a /etc/apt/sources.list.d/signal-xenial.list
+   # Signal uses 'xenial' for all Ubuntu versions for compatibility
+   echo "deb [arch=amd64 signed-by=/usr/share/keyrings/signal-desktop-keyring.gpg] https://updates.signal.org/desktop/apt xenial main" |\
+   sudo tee /etc/apt/sources.list.d/signal-xenial.list
 
    # 3. Update your package database and install signal
    sudo apt update && sudo apt install signal-desktop
 fi
 
-curl -sL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x2EE0EA64E40A89B84B2DF73499E82A75642AC823" | sudo apt-key add
-curl https://pkgs.tailscale.com/stable/ubuntu/focal.gpg | sudo apt-key add -
-curl https://pkgs.tailscale.com/stable/ubuntu/focal.list | sudo tee /etc/apt/sources.list.d/tailscale.list
+curl -sL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x2EE0EA64E40A89B84B2DF73499E82A75642AC823" | gpg --dearmor | sudo tee /usr/share/keyrings/scalasbt-release.gpg > /dev/null
+
+# Tailscale repository setup with version detection
+UBUNTU_CODENAME=$(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
+# Tailscale uses the generic codename for newer versions not yet explicitly supported
+# Try the current codename first, fall back to 'noble' for Ubuntu 25.10+ if not available
+if curl -f -s -I "https://pkgs.tailscale.com/stable/ubuntu/${UBUNTU_CODENAME}/Release" > /dev/null 2>&1; then
+  TAILSCALE_CODENAME=$UBUNTU_CODENAME
+else
+  # Fall back to noble (24.04) for newer versions
+  TAILSCALE_CODENAME="noble"
+fi
+
+curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/${TAILSCALE_CODENAME}.noarmor.gpg | sudo tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
+curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/${TAILSCALE_CODENAME}.tailscale-keyring.list | sudo tee /etc/apt/sources.list.d/tailscale.list
 echo "deb https://dl.bintray.com/sbt/debian /" | sudo tee -a /etc/apt/sources.list.d/sbt.list
 sudo apt-get update
 # Skip tailscale because of potential conflicts
@@ -48,7 +61,15 @@ sudo apt-get update
 wget https://dl.google.com/go/go1.13.1.linux-amd64.tar.gz
 sudo tar -C /usr/local -xvf go1.13.1.linux-amd64.tar.gz
 sudo pip install Pygments sphinx pypandoc mkdocs &
-sudo gem2.3 install jekyll pygments.rb &
+
+# Try to find available gem version (try gem first, then fall back to specific versions)
+GEM_CMD=$(command -v gem || command -v gem2.7 || command -v gem2.5 || command -v gem2.3 || echo "")
+if [ -n "$GEM_CMD" ]; then
+  sudo $GEM_CMD install jekyll pygments.rb &
+else
+  echo "Warning: No gem command found, skipping jekyll/pygments.rb installation"
+fi
+
 sudo Rscript -e 'install.packages(c("knitr", "devtools", "roxygen2", "testthat", "rmarkdown"), repos="http://cran.stat.ucla.edu/")' &
 gpg2 --recv-keys 409B6B1796C275462A1703113804BB82D39DC0E3
 curl -L https://get.rvm.io | bash -s stable
