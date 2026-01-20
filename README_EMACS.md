@@ -106,6 +106,8 @@ On macOS, this configuration automatically:
 
 ## Language-Specific Key Bindings
 
+**Note:** For consistency across all languages with LSP support, `M-d` and `M-.` are both bound to find/go to definition.
+
 ### Scala
 
 Scala mode includes integration with SBT and Metals LSP server.
@@ -113,7 +115,8 @@ Scala mode includes integration with SBT and Metals LSP server.
 | Key Binding | Command | Description |
 |------------|---------|-------------|
 | `M-d` | `lsp-find-definition` | Find definition (LSP) |
-| `M-.` | `lsp-find-definition` | Navigate to definition (LSP - same as M-d) |
+| `M-.` | `lsp-find-definition` | Go to definition (LSP - same as M-d) |
+| `M-C-d` | `sbt-find-definitions` | Find definition using grep (fallback when LSP fails) |
 | `C-x '` | `sbt-run-previous-command` | Re-run last SBT command |
 | `RET` | `newline-and-indent` | New line with auto-indent |
 
@@ -130,8 +133,8 @@ Java mode includes Eclipse JDT Language Server support.
 
 | Key Binding | Command | Description |
 |------------|---------|-------------|
-| `M-.` | `lsp-find-definition` | Navigate to definition |
-| `M-d` | `lsp-find-definition` | Find definition |
+| `M-d` | `lsp-find-definition` | Find definition (LSP) |
+| `M-.` | `lsp-find-definition` | Go to definition (LSP - same as M-d) |
 | `RET` | `newline-and-indent` | New line with auto-indent |
 
 **Indentation:**

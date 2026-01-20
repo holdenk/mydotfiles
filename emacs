@@ -159,7 +159,8 @@
 ;;;
 ;;; Key Bindings (Scala):
 ;;; - M-d: Find definition (LSP)
-;;; - M-.: Navigate to definition (LSP - same as M-d)
+;;; - M-.: Go to definition (LSP - same as M-d)
+;;; - M-C-d: Find definition using grep (fallback when LSP fails)
 ;;; - C-x ': Re-run previous SBT command
 ;;; ============================================================================
 ;; Enable scala-mode for .scala and .sbt files
@@ -185,11 +186,15 @@
 
 ;; Scala mode key bindings
 (add-hook 'scala-mode-hook '(lambda ()
+   ;; LSP-based definition lookup
+   (local-set-key (kbd "M-d") #'lsp-find-definition)
+   (local-set-key (kbd "M-.") #'lsp-find-definition)
+   
+   ;; Grep-based fallback when LSP fails
+   (local-set-key (kbd "M-C-d") 'sbt-find-definitions)
+   
    ;; Re-compile code after changes
    (local-set-key (kbd "C-x '") 'sbt-run-previous-command)
-
-   ;; LSP-based definition lookup (M-. for jump to definition)
-   (local-set-key (kbd "M-.") #'lsp-find-definition)
 ))
 
 ;; Scala indentation style
@@ -227,11 +232,14 @@
 ;;; - lsp-java for language server support (Eclipse JDT)
 ;;;
 ;;; Key Bindings (Java):
-;;; - M-.: Navigate to definition (LSP)
+;;; - M-d: Find definition (LSP)
+;;; - M-.: Go to definition (LSP - same as M-d)
 ;;; - RET: Auto-indent on newline
 ;;; ============================================================================
-;; Java LSP key binding
-(add-hook 'java-mode-hook (lambda () (local-set-key (kbd "M-.") #'lsp-find-definition)))
+;; Java LSP key bindings
+(add-hook 'java-mode-hook (lambda () 
+  (local-set-key (kbd "M-d") #'lsp-find-definition)
+  (local-set-key (kbd "M-.") #'lsp-find-definition)))
 
 ;; Java mode formatting and indentation
 (add-hook 'java-mode-hook (function
@@ -355,18 +363,6 @@
 
 ;; LSP UI enhancements
 (use-package lsp-ui)
-
-;; Additional LSP key bindings for Scala
-(add-hook 'scala-mode-hook
-	  '(lambda ()
-	     (local-set-key "\M-d" 'lsp-find-definition)
-	     ))
-
-;; Additional LSP key bindings for Java
-(add-hook 'java-mode-hook
-	  '(lambda ()
-	     (local-set-key "\M-d" 'lsp-find-definition)
-	     ))
 
 ;; Enable LSP for XML files
 (add-hook 'nxml-mode-hook #'lsp)
