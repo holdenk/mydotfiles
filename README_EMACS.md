@@ -112,8 +112,8 @@ Scala mode includes integration with SBT and Metals LSP server.
 
 | Key Binding | Command | Description |
 |------------|---------|-------------|
-| `M-d` | `sbt-find-definitions` / `lsp-find-definition` | Find definition (grep or LSP) |
-| `M-.` | `lsp-find-definition` | Navigate to definition (LSP) |
+| `M-d` | `lsp-find-definition` | Find definition (LSP) |
+| `M-.` | `lsp-find-definition` | Navigate to definition (LSP - same as M-d) |
 | `C-x '` | `sbt-run-previous-command` | Re-run last SBT command |
 | `RET` | `newline-and-indent` | New line with auto-indent |
 

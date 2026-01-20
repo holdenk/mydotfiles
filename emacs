@@ -158,8 +158,8 @@
 ;;; - lsp-mode/lsp-metals for intelligent code completion and navigation
 ;;;
 ;;; Key Bindings (Scala):
-;;; - M-d: Find definition (with sbt-find-definitions or lsp-find-definition)
-;;; - M-.: Navigate to definition (LSP)
+;;; - M-d: Find definition (LSP)
+;;; - M-.: Navigate to definition (LSP - same as M-d)
 ;;; - C-x ': Re-run previous SBT command
 ;;; ============================================================================
 ;; Enable scala-mode for .scala and .sbt files
@@ -185,13 +185,10 @@
 
 ;; Scala mode key bindings
 (add-hook 'scala-mode-hook '(lambda ()
-   ;; sbt-find-definitions: Find definitions using grep
-   (local-set-key (kbd "M-d") 'sbt-find-definitions)
-
    ;; Re-compile code after changes
    (local-set-key (kbd "C-x '") 'sbt-run-previous-command)
 
-   ;; LSP-based definition lookup (better when metals is working)
+   ;; LSP-based definition lookup (M-. for jump to definition)
    (local-set-key (kbd "M-.") #'lsp-find-definition)
 ))
 
