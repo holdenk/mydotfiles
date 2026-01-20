@@ -106,7 +106,7 @@ On macOS, this configuration automatically:
 
 ## Language-Specific Key Bindings
 
-**Note:** `M-d` is used for goto definition (LSP), while `M-.` is for find definition (grep for Scala, LSP for Java/other languages).
+**Note:** `M-d` is consistently used for goto definition via LSP across all languages. For Scala, `M-.` provides a grep-based fallback when LSP fails. For Java and other languages, `M-.` also uses LSP.
 
 ### Scala
 

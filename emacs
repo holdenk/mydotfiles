@@ -231,7 +231,7 @@
 ;;;
 ;;; Key Bindings (Java):
 ;;; - M-d: Go to definition (LSP)
-;;; - M-.: Find definition (LSP - same as M-d for Java)
+;;; - M-.: Find definition (LSP - same as M-d, no grep fallback)
 ;;; - RET: Auto-indent on newline
 ;;; ============================================================================
 ;; Java mode configuration
