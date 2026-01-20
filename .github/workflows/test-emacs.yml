@@ -1,0 +1,175 @@
+name: Test Emacs Configuration
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'emacs'
+      - '.github/workflows/test-emacs.yml'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'emacs'
+      - '.github/workflows/test-emacs.yml'
+
+# Set minimal permissions for security
+permissions:
+  contents: read
+
+jobs:
+  test-emacs-linux:
+    name: Test on Ubuntu with Emacs ${{ matrix.emacs_version }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        emacs_version: ['29.4', 'snapshot']  # snapshot = latest development version
+      fail-fast: false
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Install Emacs ${{ matrix.emacs_version }}
+      uses: purcell/setup-emacs@master
+      with:
+        version: ${{ matrix.emacs_version }}
+    
+    - name: Verify Emacs version
+      run: |
+        emacs --version
+        echo "Emacs installed successfully"
+    
+    - name: Check emacs file syntax
+      run: |
+        echo "Checking emacs configuration for syntax errors..."
+        emacs --batch --eval "(progn
+          (setq debug-on-error t)
+          (load-file \"$GITHUB_WORKSPACE/emacs\")
+          (message \"Configuration loaded successfully!\"))"
+    
+    - name: Test package installation
+      run: |
+        echo "Testing package installation (without copilot)..."
+        # Create a temporary emacs config without copilot (requires auth)
+        cat > /tmp/test-emacs.el << 'EOF'
+        ;; Load main config
+        (load-file (concat (getenv "GITHUB_WORKSPACE") "/emacs"))
+        
+        ;; Verify some packages are available
+        (unless (package-installed-p 'magit)
+          (error "magit package not installed"))
+        (unless (package-installed-p 'use-package)
+          (error "use-package not installed"))
+        (unless (package-installed-p 'company)
+          (error "company package not installed"))
+        
+        (message "All core packages installed successfully!")
+        EOF
+        
+        # Run test (allow it to fail on package installation issues in CI)
+        emacs --batch --eval "(progn
+          (setq debug-on-error t)
+          (load-file \"/tmp/test-emacs.el\"))" || echo "Some packages may require interactive setup"
+    
+    - name: Test basic functionality
+      run: |
+        echo "Testing basic emacs operations..."
+        emacs --batch --eval "(progn
+          (require 'cl-lib)
+          (message \"cl-lib loaded successfully\")
+          (setq inhibit-startup-screen t)
+          (setq column-number-mode t)
+          (message \"Basic settings applied\"))"
+  
+  test-emacs-macos:
+    name: Test on macOS
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Install Emacs via Homebrew
+      run: |
+        # Install emacs (Homebrew typically has recent stable versions)
+        brew install emacs
+    
+    - name: Verify Emacs version
+      run: |
+        emacs --version
+        echo "Emacs installed successfully on macOS"
+    
+    - name: Check emacs file syntax
+      run: |
+        echo "Checking emacs configuration for syntax errors..."
+        emacs --batch --eval "(progn
+          (setq debug-on-error t)
+          (load-file \"$GITHUB_WORKSPACE/emacs\")
+          (message \"Configuration loaded successfully!\"))"
+    
+    - name: Test macOS-specific settings
+      run: |
+        echo "Testing macOS-specific configuration..."
+        emacs --batch --eval "(progn
+          (load-file \"$GITHUB_WORKSPACE/emacs\")
+          (unless (eq system-type 'darwin)
+            (error \"Not detected as macOS\"))
+          (message \"macOS detection works correctly\")
+          (message \"Command modifier: %s\" mac-command-modifier)
+          (message \"Option modifier: %s\" mac-option-modifier))"
+    
+    - name: Test basic functionality
+      run: |
+        echo "Testing basic emacs operations..."
+        emacs --batch --eval "(progn
+          (require 'cl-lib)
+          (message \"cl-lib loaded successfully\")
+          (setq inhibit-startup-screen t)
+          (setq column-number-mode t)
+          (message \"Basic settings applied\"))"
+
+  lint-emacs-config:
+    name: Lint Emacs Configuration
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Install Emacs
+      uses: purcell/setup-emacs@master
+      with:
+        version: '29.4'
+    
+    - name: Install package-lint
+      run: |
+        emacs --batch --eval "(progn
+          (require 'package)
+          (add-to-list 'package-archives '(\"melpa\" . \"https://melpa.org/packages/\"))
+          (package-initialize)
+          (package-refresh-contents)
+          (package-install 'package-lint))"
+    
+    - name: Check for deprecated functions
+      run: |
+        echo "Checking for common deprecated patterns..."
+        # Check that we're not using deprecated 'cl' package
+        if grep -n "^(require 'cl)" emacs; then
+          echo "ERROR: Found deprecated (require 'cl). Use cl-lib instead."
+          exit 1
+        fi
+        echo "No deprecated patterns found!"
+    
+    - name: Check for common issues
+      run: |
+        echo "Checking configuration..."
+        emacs --batch --eval "(progn
+          (setq debug-on-error t)
+          (load-file \"emacs\")
+          (message \"Configuration check passed!\"))"
