@@ -194,8 +194,12 @@
    ;; Re-compile code after changes
    (local-set-key (kbd "C-x '") 'sbt-run-previous-command)
    
-   ;; Auto-indent on return
-   (local-set-key (kbd "RET") 'newline-and-indent)
+   ;; RET handling with multiline comment support
+   (local-set-key (kbd "RET")
+                  (lambda ()
+                    (interactive)
+                    (newline-and-indent)
+                    (scala-indent:insert-asterisk-on-multiline-comment)))
    
    ;; Clean up whitespace before saving
    (make-local-variable 'before-save-hook)
@@ -203,13 +207,6 @@
    
    ;; Indentation settings
    (c-set-offset 'arglist-intro 4)
-   
-   ;; Better RET handling for multiline comments
-   (local-set-key (kbd "RET")
-                  (lambda ()
-                    (interactive)
-                    (newline-and-indent)
-                    (scala-indent:insert-asterisk-on-multiline-comment)))
    
    ;; Enable spell checking in comments
    (flyspell-prog-mode)
