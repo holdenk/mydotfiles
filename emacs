@@ -53,7 +53,7 @@
 (set-face-attribute 'default nil :height 230)
 
 ;; Turn on debug on quit - useful for troubleshooting
-(setq debug-on-quit 't)
+(setq debug-on-quit t)
 
 ;;; ============================================================================
 ;;; Package Management Setup
@@ -145,9 +145,9 @@
 
 ;; Shell script indentation settings
 (add-hook 'sh-mode-hook
-	  (function (lambda ()
-		      (setq sh-basic-offset 2
-			    sh-indentation 2))))
+	  (lambda ()
+	    (setq sh-basic-offset 2
+		  sh-indentation 2)))
 
 ;;; ============================================================================
 ;;; Scala Development Configuration
@@ -158,9 +158,8 @@
 ;;; - lsp-mode/lsp-metals for intelligent code completion and navigation
 ;;;
 ;;; Key Bindings (Scala):
-;;; - M-d: Find definition (LSP)
-;;; - M-.: Go to definition (LSP - same as M-d)
-;;; - M-C-d: Find definition using grep (fallback when LSP fails)
+;;; - M-d: Go to definition (LSP)
+;;; - M-.: Find definition using grep (fallback when LSP fails)
 ;;; - C-x ': Re-run previous SBT command
 ;;; ============================================================================
 ;; Enable scala-mode for .scala and .sbt files
@@ -184,38 +183,40 @@
   ;; Increase file watch threshold for large projects
   (lsp-file-watch-threshold 200000))
 
-;; Scala mode key bindings
-(add-hook 'scala-mode-hook '(lambda ()
-   ;; LSP-based definition lookup
+;; Scala mode key bindings and configuration
+(add-hook 'scala-mode-hook (lambda ()
+   ;; LSP-based goto definition
    (local-set-key (kbd "M-d") #'lsp-find-definition)
-   (local-set-key (kbd "M-.") #'lsp-find-definition)
    
-   ;; Grep-based fallback when LSP fails
-   (local-set-key (kbd "M-C-d") 'sbt-find-definitions)
+   ;; Grep-based find definition (fallback when LSP fails)
+   (local-set-key (kbd "M-.") 'sbt-find-definitions)
    
    ;; Re-compile code after changes
    (local-set-key (kbd "C-x '") 'sbt-run-previous-command)
+   
+   ;; Auto-indent on return
+   (local-set-key (kbd "RET") 'newline-and-indent)
+   
+   ;; Clean up whitespace before saving
+   (make-local-variable 'before-save-hook)
+   (add-hook 'before-save-hook 'whitespace-cleanup nil t)
+   
+   ;; Indentation settings
+   (c-set-offset 'arglist-intro 4)
+   
+   ;; Better RET handling for multiline comments
+   (local-set-key (kbd "RET")
+                  (lambda ()
+                    (interactive)
+                    (newline-and-indent)
+                    (scala-indent:insert-asterisk-on-multiline-comment)))
+   
+   ;; Enable spell checking in comments
+   (flyspell-prog-mode)
 ))
 
 ;; Scala indentation style
 (setq scala-indent:use-javadoc-style t)
-
-;; Additional Scala mode hooks for formatting and indentation
-(add-hook 'scala-mode-hook (function (lambda ()
-				       ;; Auto-indent on return
-				       (local-set-key (kbd "RET") 'newline-and-indent)
-				       ;; Clean up whitespace before saving
-				       (make-local-variable 'before-save-hook)
-				       (add-hook 'before-save-hook 'whitespace-cleanup nil t)
-				       ;; Indentation settings
-				       (c-set-offset 'arglist-intro 4)
-				       ;; Better RET handling for Scala
-				       (local-set-key (kbd "RET")
-						      '(lambda ()
-							 (interactive)
-							 (newline-and-indent)
-							 (scala-indent:insert-asterisk-on-multiline-comment)))
-				       )))
 
 ;;; ============================================================================
 ;;; General Editor Settings
@@ -232,29 +233,28 @@
 ;;; - lsp-java for language server support (Eclipse JDT)
 ;;;
 ;;; Key Bindings (Java):
-;;; - M-d: Find definition (LSP)
-;;; - M-.: Go to definition (LSP - same as M-d)
+;;; - M-d: Go to definition (LSP)
+;;; - M-.: Find definition (LSP - same as M-d for Java)
 ;;; - RET: Auto-indent on newline
 ;;; ============================================================================
-;; Java LSP key bindings
+;; Java mode configuration
 (add-hook 'java-mode-hook (lambda () 
+  ;; LSP key bindings
   (local-set-key (kbd "M-d") #'lsp-find-definition)
-  (local-set-key (kbd "M-.") #'lsp-find-definition)))
-
-;; Java mode formatting and indentation
-(add-hook 'java-mode-hook (function
-			   (lambda ()
-			     ;; Auto-indent on return
-			     (local-set-key (kbd "RET") 'newline-and-indent)
-			     ;; Indentation settings
-			     (setq c-basic-offset 2
-				   tab-width 2
-				   indent-tabs-mode nil      ; Use spaces, not tabs
-				   c-argdecl-indent 0          ; No extra indent for arguments
-				   c-tab-always-indent t
-				   backward-delete-function nil)
-			     (c-set-offset 'arglist-intro '+)
-)))
+  (local-set-key (kbd "M-.") #'lsp-find-definition)
+  
+  ;; Auto-indent on return
+  (local-set-key (kbd "RET") 'newline-and-indent)
+  
+  ;; Indentation settings
+  (setq c-basic-offset 2
+        tab-width 2
+        indent-tabs-mode nil      ; Use spaces, not tabs
+        c-argdecl-indent 0          ; No extra indent for arguments
+        c-tab-always-indent t
+        backward-delete-function nil)
+  (c-set-offset 'arglist-intro '+)
+))
 
 ;; Enable LSP for Java files
 (add-hook 'java-mode-hook #'lsp)
@@ -265,11 +265,6 @@
 
 ;; AsciiDoc mode for .asciidoc files
 (add-to-list 'auto-mode-alist (cons "\\.asciidoc\\'" 'adoc-mode))
-
-;; Enable spell checking in various modes
-;; flyspell-prog-mode: spell check in comments and strings only
-(add-hook 'scala-mode-hook (lambda ()
-			     (flyspell-prog-mode)))
 
 ;; flyspell-mode: spell check everything (for documentation files)
 (add-hook 'adoc-mode-hook (lambda ()
@@ -321,7 +316,7 @@
 (add-hook 'clojure-mode-hook 'cider-mode)
 
 ;; Prefer local resources (faster REPL startup)
-(set 'cider-prefer-local-resources t)
+(setq cider-prefer-local-resources t)
 
 ;;; ============================================================================
 ;;; File Navigation
