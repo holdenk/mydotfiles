@@ -5,6 +5,7 @@ set -ex
 mamba install --yes python==3.8.6
 
 # Install modern Python versions as separate environments
+# To use: conda activate py310 (or py311/py312)
 echo "Installing modern Python versions..."
 mamba create --yes -n py310 python=3.10
 mamba create --yes -n py311 python=3.11
