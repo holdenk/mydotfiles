@@ -27,6 +27,7 @@
 ;; Load packages
 (require 'package)
 (require 'cl-lib)
+(require 'xml)
 
 (setq package-archives '(("gnu" . "http://elpa.gnu.org/packages/")
 			 ("melpa" . "https://melpa.org/packages/")))
@@ -68,6 +69,9 @@
   :custom
   (lsp-metals-treeview-show-when-views-received t)
   (lsp-file-watch-threshold 200000)) ;; maybe too much?
+(use-package treemacs)
+(use-package lsp-treemacs
+  :after (lsp-mode treemacs))
 (add-hook 'scala-mode-hook '(lambda ()
    ;; sbt-find-definitions is a command that tries to find (with grep)
    ;; the definition of the thing at point.
@@ -170,19 +174,57 @@
 (setq magit-process-connection-type t)
 (global-set-key (kbd "C-x p") 'project-find-file)
 
-;; Copilot via quelpa
+;; Copilot via quelpa with expected failure
+(defvar holden/copilot-broken nil
+  "If non-nil, Copilot is considered broken and will not be retried this session.")
+
+(defun holden/copilot-available-p ()
+  "Return non-nil if Copilot's language server is available."
+  (executable-find "copilot-language-server"))
+
+(defun holden/copilot-install-message ()
+  (concat
+   "Copilot language server not found.\n\n"
+   "Install it with:\n"
+   "  npm install -g @github/copilot-language-server\n\n"
+   "If npm is not installed:\n"
+   "  sudo apt install nodejs npm\n\n"
+   "If installed but still not found, ensure npm's bin dir is on PATH:\n"
+   "  npm config get prefix\n"
+   "  export PATH=\"$HOME/.local/bin:$PATH\"\n"))
+
+(defun holden/try-enable-copilot ()
+  "Enable copilot-mode safely. If Copilot is missing or broken, explain how to fix it
+and disable further attempts for this session."
+  (unless holden/copilot-broken
+    (cond
+     ((not (holden/copilot-available-p))
+      (setq holden/copilot-broken t)
+      (message "%s" (holden/copilot-install-message)))
+     (t
+      (condition-case err
+          (copilot-mode 1)
+        (error
+         (setq holden/copilot-broken t)
+         (message "Copilot failed and is now disabled for this session.\n\n%s\nError was: %s"
+                  (holden/copilot-install-message)
+                  (error-message-string err))))))))
+
 (use-package quelpa-use-package)
+
 (use-package copilot
   :quelpa (copilot.el :fetcher github
                       :repo "zerolfx/copilot.el"
                       :branch "main"
                       :files ("dist" "*.el"))
-  :hook (prog-mode . copilot-mode)
+  :hook (prog-mode . holden/try-enable-copilot)
   :config
   (define-key copilot-mode-map (kbd "M-<next>")  #'copilot-next-completion)
   (define-key copilot-mode-map (kbd "M-<prior>") #'copilot-previous-completion)
   (define-key copilot-mode-map (kbd "M-<right>") #'copilot-accept-completion-by-word)
   (define-key copilot-mode-map (kbd "M-<down>")  #'copilot-accept-completion-by-line))
+
+
 
 (use-package editorconfig :config (editorconfig-mode 1))
 (custom-set-variables
