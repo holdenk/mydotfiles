@@ -7,19 +7,33 @@
 (setq column-number-mode t)
 
 ;; For hi-res
-(set-face-attribute 'default nil :height 230)
+;; (set-face-attribute 'default nil :height 230)
+(defun holden/set-font-height-dynamic ()
+  "Set font height based on display pixel size (fallback-friendly)."
+  (let* ((pxw (display-pixel-width))
+         ;; rough tiers; tweak numbers to taste
+         (h (cond
+             ((>= pxw 3800) 220) ; 4K-ish
+             ((>= pxw 2500) 190) ; 1440p-ish
+             ((>= pxw 1900) 160) ; 1080p-ish
+             (t 140))))
+    (set-face-attribute 'default nil :height h)
+    (message "Font height set to %d (display width %dpx)" h pxw)))
+;; Enabled the high res switching
+(add-hook 'after-init-hook #'holden/set-font-height-dynamic)
+(add-hook 'after-make-frame-functions (lambda (_frame) (holden/set-font-height-dynamic)))
 ;; Turn on debug on quit
 (setq debug-on-quit 't)
 ;; Load packages
 (require 'package)
-(require 'cl)
+(require 'cl-lib)
 
 (setq package-archives '(("gnu" . "http://elpa.gnu.org/packages/")
 			 ("melpa" . "https://melpa.org/packages/")))
 (unless package--initialized (package-initialize))
 (unless package-archive-contents (package-refresh-contents))
 
-(setq package-list '(magit find-things-fast adoc-mode go-mode flycheck jsonnet-mode use-package lsp-mode lsp-latex lsp-pyright lsp-ui sbt-mode yaml-mode yasnippet markdown-mode dockerfile-mode lsp-java rust-mode typescript-mode  quelpa-use-package editorconfig scala-mode sbt-mode))
+(setq package-list '(magit find-things-fast adoc-mode go-mode flycheck jsonnet-mode use-package lsp-mode lsp-latex lsp-pyright lsp-ui sbt-mode yaml-mode yasnippet markdown-mode dockerfile-mode lsp-java rust-mode typescript-mode  quelpa-use-package editorconfig scala-mode sbt-mode company cider dap-mode))
 
 ;; Install the missing packages
 (dolist (package package-list)
@@ -44,6 +58,10 @@
 (use-package lsp-mode
   :hook ((scala-mode . lsp))
   :custom (lsp-completion-provider :capf))
+(use-package dap-mode
+  :after lsp-mode
+  :commands dap-debug
+  :config (dap-auto-configure-mode))
 (use-package lsp-metals
   :after lsp-mode
   :hook (scala-mode . lsp)
@@ -136,10 +154,6 @@
 (setq tramp-default-method "ssh")
 ;; Highlight wasn't super visible on this machine
 (set-face-attribute 'region nil :background "#999")
-(use-package lsp-mode
-  ;; Enable lsp for scala
-  :hook (scala-mode . lsp)
-  :config (setq lsp-prefer-flymake nil))
 (use-package lsp-ui)
 (add-hook 'scala-mode-hook
 	  '(lambda ()
@@ -177,13 +191,11 @@
  ;; Your init file should contain only one such instance.
  ;; If there is more than one, they won't work right.
  '(package-selected-packages
-   '(lsp-pyright lsp-latex lsp-mssql 0blayout editorconfig copilot.el
-		 quelpa-use-package typescript-mode cargo-mode
-		 flycheck-rust ## rust-mode cider company lsp-java
-		 dockerfile-mode yasnippet yaml-mode sbt-mode lsp-ui
-		 lsp-mode use-package jsonnet-mode flycheck go-mode
-		 adoc-mode find-things-fast magit scala-mode
-		 cmake-mode))
+   '(## adoc-mode cider company copilot.el dap dockerfile-mode
+	find-things-fast flycheck go-mode jsonnet-mode lsp-java
+	lsp-latex lsp-pyright lsp-ui magit quelpa-use-package
+	rust-mode sbt-mode scala-mode typescript-mode yaml-mode
+	yasnippet))
  '(warning-suppress-types '((emacs))))
 (custom-set-faces
  ;; custom-set-faces was added by Custom.

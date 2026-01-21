@@ -58,3 +58,7 @@ sudo tar -C /usr/local -xvf go1.13.1.linux-amd64.tar.gz
 
 GH_USER=${GH_USER:-holdenk}
 curl https://github.com/${GH_USER}.keys | ${RUN_DEST_CMD} tee -a ~/authorized_keys
+
+
+sudo npm i -g @github/copilot-language-server
+
