@@ -98,6 +98,7 @@ rtl-sdr
 ruby
 ruby-build
 ruby-bundler
+ruby-dev
 ruby-json
 ruby-pg
 scala
