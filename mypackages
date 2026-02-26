@@ -98,6 +98,7 @@ rtl-sdr
 ruby
 ruby-build
 ruby-bundler
+ruby-json
 ruby-pg
 scala
 scala-mode-el
