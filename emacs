@@ -64,15 +64,21 @@
 ;; Enabled the high res switching
 (add-hook 'after-init-hook #'holden/set-font-height-dynamic)
 (add-hook 'after-make-frame-functions (lambda (_frame) (holden/set-font-height-dynamic)))
-;; Turn on debug on quit
-(setq debug-on-quit 't)
-;; Load packages
+;;; ============================================================================
+;;; Package Management Setup
+;;; ============================================================================
+
+;; Load package system
 (require 'package)
-(require 'cl-lib)
-(require 'xml)
 
 ;; Use cl-lib instead of deprecated cl package for modern Emacs compatibility
 (require 'cl-lib)
+
+;; Also load xml for various XML handling
+(require 'xml)
+
+;; Turn on debug on quit - useful for troubleshooting
+(setq debug-on-quit t)
 
 ;; Configure package archives
 ;; Using HTTPS for security
@@ -113,7 +119,13 @@
   lsp-java                ; Java language server
   lsp-latex               ; LaTeX language server
   lsp-pyright             ; Python language server (Pyright)
+  lsp-metals              ; Scala language server (Metals)
+  lsp-treemacs            ; LSP integration with Treemacs
+  dap-mode                ; Debug Adapter Protocol support
+  treemacs                ; Project tree navigator
   company                 ; Auto-completion framework
+  cider                   ; Clojure IDE
+  transient               ; Transient command interface (for Magit)
   
   ;; Code quality
   flycheck                ; Syntax checking
@@ -124,8 +136,6 @@
   
   ;; Editor enhancements
   editorconfig            ; EditorConfig support
-  cider                   ; Clojure IDE
-  transient               ; Transient command interface (for Magit)
 ))
 
 ;; Install any missing packages automatically
@@ -182,10 +192,12 @@
   :hook ((scala-mode . lsp))
   :custom (lsp-completion-provider :capf))
 
+;; DAP mode for debugging support
 (use-package dap-mode
   :after lsp-mode
   :commands dap-debug
   :config (dap-auto-configure-mode))
+
 ;; Metals (Scala language server) configuration
 (use-package lsp-metals
   :after lsp-mode
@@ -193,14 +205,13 @@
   :custom
   ;; Show tree view when views are received
   (lsp-metals-treeview-show-when-views-received t)
-  (lsp-file-watch-threshold 200000)) ;; maybe too much?
+  ;; Increase file watch threshold for large projects
+  (lsp-file-watch-threshold 200000))
+
+;; Treemacs for project navigation
 (use-package treemacs)
 (use-package lsp-treemacs
   :after (lsp-mode treemacs))
-(add-hook 'scala-mode-hook '(lambda ()
-   ;; sbt-find-definitions is a command that tries to find (with grep)
-   ;; the definition of the thing at point.
-   (local-set-key (kbd "M-d") 'sbt-find-definitions)
 
 ;; Scala mode key bindings and configuration
 (add-hook 'scala-mode-hook (lambda ()
