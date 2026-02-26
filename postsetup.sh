@@ -62,3 +62,5 @@ curl https://github.com/${GH_USER}.keys | ${RUN_DEST_CMD} tee -a ~/authorized_ke
 
 sudo npm i -g @github/copilot-language-server
 
+# Bundler
+bundle config set --local path  ~/.ruby_bundles
