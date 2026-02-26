@@ -31,9 +31,66 @@ EOF
 
 sudo apt-fast update && sudo apt-get -y upgrade
 sudo apt-get install -y docker-ce docker-ce-cli containerd.io
-sudo apt-fast install -y `cat mypackages`
+
+# Install packages from mypackages with graceful fallback
+echo "Checking package availability from mypackages..."
+AVAILABLE_PACKAGES=""
+SKIPPED_PACKAGES=""
+
+while IFS= read -r package; do
+  # Skip empty lines and comments
+  [[ -z "$package" || "$package" =~ ^[[:space:]]*# ]] && continue
+  
+  # Check if package is available in apt cache
+  if apt-cache show "$package" > /dev/null 2>&1; then
+    AVAILABLE_PACKAGES="$AVAILABLE_PACKAGES $package"
+  else
+    echo "Warning: Package $package not found in repositories, skipping..."
+    SKIPPED_PACKAGES="$SKIPPED_PACKAGES $package"
+  fi
+done < mypackages
+
+# Write skipped packages to a file
+if [ -n "$SKIPPED_PACKAGES" ]; then
+  echo "$SKIPPED_PACKAGES" | tr ' ' '\n' | grep -v '^$' > /tmp/skipped_packages.txt
+  echo "Skipped packages written to /tmp/skipped_packages.txt"
+fi
+
+# Install all available packages at once with apt-fast for parallelism
+if [ -n "$AVAILABLE_PACKAGES" ]; then
+  echo "Installing available packages with apt-fast..."
+  sudo apt-fast install -y $AVAILABLE_PACKAGES
+fi
+
 if [ -z "$SERVER" ]; then
-   sudo apt-fast install -y `cat mydesktoppackages`
+   echo "Checking desktop package availability from mydesktoppackages..."
+   AVAILABLE_DESKTOP_PACKAGES=""
+   SKIPPED_DESKTOP_PACKAGES=""
+   
+   while IFS= read -r package; do
+     # Skip empty lines and comments
+     [[ -z "$package" || "$package" =~ ^[[:space:]]*# ]] && continue
+     
+     # Check if package is available in apt cache
+     if apt-cache show "$package" > /dev/null 2>&1; then
+       AVAILABLE_DESKTOP_PACKAGES="$AVAILABLE_DESKTOP_PACKAGES $package"
+     else
+       echo "Warning: Package $package not found in repositories, skipping..."
+       SKIPPED_DESKTOP_PACKAGES="$SKIPPED_DESKTOP_PACKAGES $package"
+     fi
+   done < mydesktoppackages
+   
+   # Write skipped desktop packages to a file
+   if [ -n "$SKIPPED_DESKTOP_PACKAGES" ]; then
+     echo "$SKIPPED_DESKTOP_PACKAGES" | tr ' ' '\n' | grep -v '^$' >> /tmp/skipped_packages.txt
+     echo "Skipped desktop packages written to /tmp/skipped_packages.txt"
+   fi
+   
+   # Install all available desktop packages at once with apt-fast for parallelism
+   if [ -n "$AVAILABLE_DESKTOP_PACKAGES" ]; then
+     echo "Installing available desktop packages with apt-fast..."
+     sudo apt-fast install -y $AVAILABLE_DESKTOP_PACKAGES
+   fi
 #   sudo add-apt-repository -y ppa:obsproject/obs-studio
 #   sudo apt-fast update
 #   sudo apt-fast install -y obs-studio
@@ -55,15 +112,21 @@ export arch=$(uname -m)
 if [ "$arch" == "aarm64" ]; then
   arch="arm64";
 fi
-wget --quiet https://github.com/conda-forge/miniforge/releases/download/4.8.5-1/Miniforge3-4.8.5-1-Linux-${arch}.sh -O ~/miniforge.sh
-chmod a+x ~/miniforge.sh
-sudo ~/miniforge.sh -b -p /opt/conda
-sudo /opt/conda/bin/conda clean -tipsy
-sudo ln -s /opt/conda/etc/profile.d/conda.sh /etc/profile.d/conda.sh
-echo ". /opt/conda/etc/profile.d/conda.sh" >> ~/.bashrc
-echo ". /opt/conda/etc/profile.d/conda.sh" | sudo tee -a ~/.bashrc
-echo "conda activate base" >> ~/.bashrc
-echo "conda activate base" | sudo tee -a ~/.bashrc
+# Check if conda already exists and upgrade it if present
+if [ -d "/opt/conda" ] && [ -x "/opt/conda/bin/conda" ]; then
+  echo "Conda already exists, upgrading..."
+  sudo /opt/conda/bin/conda update -n base -c defaults conda --yes
+  sudo /opt/conda/bin/conda update --all --yes
+else
+  echo "Installing conda..."
+  wget --quiet https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-${arch}.sh -O ~/miniforge.sh
+  chmod a+x ~/miniforge.sh
+  sudo ~/miniforge.sh -b -p /opt/conda
+  echo ". /opt/conda/etc/profile.d/conda.sh" >> ~/.bashrc
+  echo ". /opt/conda/etc/profile.d/conda.sh" | sudo tee -a ~/.bashrc
+  echo "conda activate base" >> ~/.bashrc
+  echo "conda activate base" | sudo tee -a ~/.bashrc
+fi
 source ~/.bashrc
 sudo /opt/conda/bin/conda clean -afy
 sudo /opt/conda/bin/conda install --yes nomkl cytoolz cmake tini
@@ -79,6 +142,30 @@ curl -sL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x2EE0EA64E40A89
 sudo chmod 644 /etc/apt/trusted.gpg.d/scalasbt-release.gpg
 sudo apt-get update
 sudo apt-get install sbt
+
+# Install Spark development tools
+# Install available Debian packages for Spark dependencies
+sudo apt-fast install -y \
+    python3-ipython \
+    python3-notebook \
+    python3-jupyter-client \
+    python3-jupyter-core \
+    python3-pandas \
+    python3-numpy \
+    python3-matplotlib
+
+# Install remaining Spark packages (pyspark, py4j, findspark) into conda environments
+# Install in base environment
+/opt/conda/bin/pip install -r spark_req.txt
+
+# Install in each Python version environment if they exist
+for env in py310 py311 py312; do
+    if /opt/conda/bin/conda info --envs | awk '{print $1}' | grep -x "$env" > /dev/null 2>&1; then
+        /opt/conda/bin/conda run -n $env pip install -r spark_req.txt
+    else
+        echo "Environment $env does not exist, skipping..."
+    fi
+done
 
 # Add user to docker
 sudo usermod -aG docker $USER

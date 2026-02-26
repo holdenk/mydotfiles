@@ -48,19 +48,28 @@
 ;; Enable column-number-mode - show column number in mode line
 (setq column-number-mode t)
 
-;; Font size for hi-res displays
-;; Adjust this value based on your display (230 works well for 4K)
-(set-face-attribute 'default nil :height 230)
-
-;; Turn on debug on quit - useful for troubleshooting
-(setq debug-on-quit t)
-
-;;; ============================================================================
-;;; Package Management Setup
-;;; ============================================================================
-
-;; Load package system
+;; For hi-res
+;; (set-face-attribute 'default nil :height 230)
+(defun holden/set-font-height-dynamic ()
+  "Set font height based on display pixel size (fallback-friendly)."
+  (let* ((pxw (display-pixel-width))
+         ;; rough tiers; tweak numbers to taste
+         (h (cond
+             ((>= pxw 3800) 220) ; 4K-ish
+             ((>= pxw 2500) 190) ; 1440p-ish
+             ((>= pxw 1900) 160) ; 1080p-ish
+             (t 140))))
+    (set-face-attribute 'default nil :height h)
+    (message "Font height set to %d (display width %dpx)" h pxw)))
+;; Enabled the high res switching
+(add-hook 'after-init-hook #'holden/set-font-height-dynamic)
+(add-hook 'after-make-frame-functions (lambda (_frame) (holden/set-font-height-dynamic)))
+;; Turn on debug on quit
+(setq debug-on-quit 't)
+;; Load packages
 (require 'package)
+(require 'cl-lib)
+(require 'xml)
 
 ;; Use cl-lib instead of deprecated cl package for modern Emacs compatibility
 (require 'cl-lib)
@@ -173,6 +182,10 @@
   :hook ((scala-mode . lsp))
   :custom (lsp-completion-provider :capf))
 
+(use-package dap-mode
+  :after lsp-mode
+  :commands dap-debug
+  :config (dap-auto-configure-mode))
 ;; Metals (Scala language server) configuration
 (use-package lsp-metals
   :after lsp-mode
@@ -180,8 +193,14 @@
   :custom
   ;; Show tree view when views are received
   (lsp-metals-treeview-show-when-views-received t)
-  ;; Increase file watch threshold for large projects
-  (lsp-file-watch-threshold 200000))
+  (lsp-file-watch-threshold 200000)) ;; maybe too much?
+(use-package treemacs)
+(use-package lsp-treemacs
+  :after (lsp-mode treemacs))
+(add-hook 'scala-mode-hook '(lambda ()
+   ;; sbt-find-definitions is a command that tries to find (with grep)
+   ;; the definition of the thing at point.
+   (local-set-key (kbd "M-d") 'sbt-find-definitions)
 
 ;; Scala mode key bindings and configuration
 (add-hook 'scala-mode-hook (lambda ()
@@ -390,13 +409,50 @@
 ;;; - M-<down>: Accept completion by line
 ;;; ============================================================================
 ;; Install Copilot from GitHub using quelpa
+;; Copilot via quelpa with expected failure
+(defvar holden/copilot-broken nil
+  "If non-nil, Copilot is considered broken and will not be retried this session.")
+
+(defun holden/copilot-available-p ()
+  "Return non-nil if Copilot's language server is available."
+  (executable-find "copilot-language-server"))
+
+(defun holden/copilot-install-message ()
+  (concat
+   "Copilot language server not found.\n\n"
+   "Install it with:\n"
+   "  npm install -g @github/copilot-language-server\n\n"
+   "If npm is not installed:\n"
+   "  sudo apt install nodejs npm\n\n"
+   "If installed but still not found, ensure npm's bin dir is on PATH:\n"
+   "  npm config get prefix\n"
+   "  export PATH=\"$HOME/.local/bin:$PATH\"\n"))
+
+(defun holden/try-enable-copilot ()
+  "Enable copilot-mode safely. If Copilot is missing or broken, explain how to fix it
+and disable further attempts for this session."
+  (unless holden/copilot-broken
+    (cond
+     ((not (holden/copilot-available-p))
+      (setq holden/copilot-broken t)
+      (message "%s" (holden/copilot-install-message)))
+     (t
+      (condition-case err
+          (copilot-mode 1)
+        (error
+         (setq holden/copilot-broken t)
+         (message "Copilot failed and is now disabled for this session.\n\n%s\nError was: %s"
+                  (holden/copilot-install-message)
+                  (error-message-string err))))))))
+
 (use-package quelpa-use-package)
+
 (use-package copilot
   :quelpa (copilot.el :fetcher github
                       :repo "zerolfx/copilot.el"
                       :branch "main"
                       :files ("dist" "*.el"))
-  :hook (prog-mode . copilot-mode)
+  :hook (prog-mode . holden/try-enable-copilot)
   :config
   (define-key copilot-mode-map (kbd "M-<next>")  #'copilot-next-completion)
   (define-key copilot-mode-map (kbd "M-<prior>") #'copilot-previous-completion)
