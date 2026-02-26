@@ -4,7 +4,6 @@ aria2
 axel
 binfmt-support
 bladerf-firmware
-bladerf-fpga
 build-essential
 checkinstall
 cmake
@@ -96,7 +95,9 @@ r-cran-rsqlite
 rbenv
 rpm-i18n
 rtl-sdr
+ruby
 ruby-build
+ruby-bundler
 ruby-pg
 scala
 scala-mode-el

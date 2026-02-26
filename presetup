@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 set -x
-mkdir /tmp/bloop
+mkdir -p /tmp/bloop
 cd /tmp/bloop
 apt-get -y install git
 git clone https://github.com/holdenk/mydotfiles.git
