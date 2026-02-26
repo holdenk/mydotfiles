@@ -206,6 +206,8 @@
   ;; Show tree view when views are received
   (lsp-metals-treeview-show-when-views-received t)
   ;; Increase file watch threshold for large projects
+  ;; Default is 1000; set to 200000 to handle projects with many files
+  ;; Adjust lower if file watching causes performance issues
   (lsp-file-watch-threshold 200000))
 
 ;; Treemacs for project navigation
