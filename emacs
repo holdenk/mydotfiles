@@ -123,6 +123,8 @@
   lsp-latex               ; LaTeX language server
   lsp-pyright             ; Python language server (Pyright)
   lsp-metals              ; Scala language server (Metals)
+  lsp-mssql               ; MSSQL language server
+  lsp-docker              ; Run LSP servers in Docker containers
   lsp-treemacs            ; LSP integration with Treemacs
   dap-mode                ; Debug Adapter Protocol support
   treemacs                ; Project tree navigator
@@ -292,8 +294,9 @@
   (c-set-offset 'arglist-intro '+)
 ))
 
-;; Enable LSP for Java files
-(add-hook 'java-mode-hook #'lsp)
+;; Enable LSP for Java files via lsp-java (Eclipse JDT)
+(use-package lsp-java
+  :hook (java-mode . lsp))
 
 ;;; ============================================================================
 ;;; Documentation and Markup Modes
@@ -398,7 +401,13 @@
          (dockerfile-mode . lsp)
          (sh-mode . lsp)
          (markdown-mode . lsp)
-         (clojure-mode . lsp))
+         (clojure-mode . lsp)
+         (c-mode . lsp)
+         (c++-mode . lsp)
+         (css-mode . lsp)
+         (html-mode . lsp)
+         (json-mode . lsp)
+         (jsonnet-mode . lsp))
   :config
   (setq lsp-prefer-flymake nil)          ; Use flycheck instead of flymake
   (setq lsp-auto-install-server t))      ; Auto-install language servers when needed
@@ -413,6 +422,13 @@
 ;; LaTeX language server
 (use-package lsp-latex
   :hook (latex-mode . lsp))
+
+;; MSSQL language server
+(use-package lsp-mssql
+  :hook (sql-mode . lsp))
+
+;; Run LSP servers inside Docker containers
+(use-package lsp-docker)
 
 ;; Enable LSP for XML files
 (add-hook 'nxml-mode-hook #'lsp)
