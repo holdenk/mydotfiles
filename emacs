@@ -198,17 +198,20 @@
 
 ;; Configure LSP mode with Scala support
 (use-package lsp-mode
+  :ensure t
   :hook ((scala-mode . lsp))
   :custom (lsp-completion-provider :capf))
 
 ;; DAP mode for debugging support
 (use-package dap-mode
+  :ensure t
   :after lsp-mode
   :commands dap-debug
   :config (dap-auto-configure-mode))
 
 ;; Metals (Scala language server) configuration
 (use-package lsp-metals
+  :ensure t
   :after lsp-mode
   :hook (scala-mode . lsp)
   :custom
@@ -220,8 +223,9 @@
   (lsp-file-watch-threshold 200000))
 
 ;; Treemacs for project navigation
-(use-package treemacs)
+(use-package treemacs :ensure t)
 (use-package lsp-treemacs
+  :ensure t
   :after (lsp-mode treemacs))
 
 ;; Scala mode key bindings and configuration
@@ -296,6 +300,7 @@
 
 ;; Enable LSP for Java files via lsp-java (Eclipse JDT)
 (use-package lsp-java
+  :ensure t
   :hook (java-mode . lsp))
 
 ;;; ============================================================================
@@ -390,8 +395,10 @@
 ;;; ============================================================================
 
 ;; Configure LSP mode for various languages
-;; lsp-auto-install-server automatically downloads language servers on first use
+;; lsp-auto-install-server t => force-install servers on first use (no manual confirmation)
+;; lsp-auto-guess-root t     => auto-detect project root (no manual prompt)
 (use-package lsp-mode
+  :ensure t
   ;; Enable lsp for all supported language modes
   :hook ((scala-mode . lsp)
          (rust-mode . lsp)
@@ -407,31 +414,33 @@
          (css-mode . lsp)
          (html-mode . lsp)
          (json-mode . lsp)
-         (jsonnet-mode . lsp))
+         (jsonnet-mode . lsp)
+         (nxml-mode . lsp))
   :config
   (setq lsp-prefer-flymake nil)          ; Use flycheck instead of flymake
-  (setq lsp-auto-install-server t))      ; Auto-install language servers when needed
+  (setq lsp-auto-install-server t)       ; Force-install language servers without manual confirmation
+  (setq lsp-auto-guess-root t))          ; Auto-detect project root without prompting
 
 ;; LSP UI enhancements
-(use-package lsp-ui)
+(use-package lsp-ui :ensure t)
 
 ;; Python language server (Pyright)
 (use-package lsp-pyright
+  :ensure t
   :hook (python-mode . lsp))
 
 ;; LaTeX language server
 (use-package lsp-latex
+  :ensure t
   :hook (latex-mode . lsp))
 
 ;; MSSQL language server
 (use-package lsp-mssql
+  :ensure t
   :hook (sql-mode . lsp))
 
 ;; Run LSP servers inside Docker containers
-(use-package lsp-docker)
-
-;; Enable LSP for XML files
-(add-hook 'nxml-mode-hook #'lsp)
+(use-package lsp-docker :ensure t)
 
 ;;; ============================================================================
 ;;; Rust Development Configuration
