@@ -19,15 +19,13 @@
 ;;;
 ;;; Requirements:
 ;;; - Emacs 27.1+ (tested with 31.0+)
-;;; - Internet connection for initial package installation
-;;; - For Scala: Metals language server
-;;; - For Java: Eclipse JDT Language Server (installed via lsp-java)
-;;; - For Python: Pyright language server
+;;; - Internet connection for initial package and language server installation
+;;; - Language servers are auto-installed on first use via lsp-mode
 ;;;
 ;;; Installation:
 ;;; 1. Copy this file to ~/.emacs or ~/.emacs.d/init.el
 ;;; 2. Start Emacs - packages will be installed automatically
-;;; 3. Install language servers as needed (e.g., metals for Scala)
+;;; 3. Open a source file - the language server will be installed automatically
 ;;;
 ;;; For detailed key bindings, see README_EMACS.md
 ;;;
@@ -89,7 +87,12 @@
 (unless package--initialized (package-initialize))
 
 ;; Refresh package contents if not already cached
-(unless package-archive-contents (package-refresh-contents))
+;; Wrapped in condition-case so Emacs starts normally when offline
+(unless package-archive-contents
+  (condition-case nil
+      (package-refresh-contents)
+    (error
+     (message "Warning: could not refresh package archives (offline?)"))))
 
 ;; List of packages to install automatically
 ;; Core packages for development workflow
@@ -139,9 +142,13 @@
 ))
 
 ;; Install any missing packages automatically
+;; Skip gracefully if offline or package archives are unavailable
 (dolist (package package-list)
   (unless (package-installed-p package)
-    (package-install package)))
+    (condition-case nil
+        (package-install package)
+      (error
+       (message "Warning: could not install package '%s' (offline?)" package)))))
 
 ;; Always ensure packages are installed when using use-package
 (setq use-package-always-ensure t)
@@ -380,13 +387,32 @@
 ;;; ============================================================================
 
 ;; Configure LSP mode for various languages
+;; lsp-auto-install-server automatically downloads language servers on first use
 (use-package lsp-mode
-  ;; Enable lsp for scala
-  :hook (scala-mode . lsp)
-  :config (setq lsp-prefer-flymake nil))  ; Use flycheck instead of flymake
+  ;; Enable lsp for all supported language modes
+  :hook ((scala-mode . lsp)
+         (rust-mode . lsp)
+         (go-mode . lsp)
+         (typescript-mode . lsp)
+         (yaml-mode . lsp)
+         (dockerfile-mode . lsp)
+         (sh-mode . lsp)
+         (markdown-mode . lsp)
+         (clojure-mode . lsp))
+  :config
+  (setq lsp-prefer-flymake nil)          ; Use flycheck instead of flymake
+  (setq lsp-auto-install-server t))      ; Auto-install language servers when needed
 
 ;; LSP UI enhancements
 (use-package lsp-ui)
+
+;; Python language server (Pyright)
+(use-package lsp-pyright
+  :hook (python-mode . lsp))
+
+;; LaTeX language server
+(use-package lsp-latex
+  :hook (latex-mode . lsp))
 
 ;; Enable LSP for XML files
 (add-hook 'nxml-mode-hook #'lsp)
