@@ -6,6 +6,7 @@ binfmt-support
 bladerf-firmware
 build-essential
 checkinstall
+cifs-utils
 cmake
 cmake-data
 curl
@@ -69,6 +70,9 @@ nmap
 nodejs
 npm
 openjdk-11-jdk
+openjdk-21-dbg
+openjdk-21-jdk
+openjdk-21-source
 openjdk-8-jdk
 openjdk-8-source
 openssh-server
@@ -105,6 +109,7 @@ scala
 scala-mode-el
 screen
 sed
+smbclient
 sqlite3
 strace
 strongswan
