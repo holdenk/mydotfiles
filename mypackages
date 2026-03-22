@@ -52,6 +52,8 @@ libical-dev
 libncurses-dev
 libnl-3-dev
 libnl-genl-3-dev
+libntlm0
+libntlm0-dev
 libpcap-dev
 libpcap0.8-dev
 libpcre3-dev
