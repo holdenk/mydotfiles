@@ -1,6 +1,4 @@
-wireshark
-mplayer
-vlc
+emacs-gtk
 libjack-jackd2-dev
 libpulse-dev
 libqt5concurrent5
@@ -19,8 +17,11 @@ libxcb-shm0-dev
 libxcb-xinerama0-dev
 libxcomposite-dev
 libxinerama-dev
+mplayer
 qt5-qmake
 qtbase5-dev
 qtbase5-dev-tools
+vlc
+wine
+wireshark
 x11proto-xinerama-dev
-emacs-gtk
