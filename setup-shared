@@ -43,6 +43,8 @@ $PKG_INSTALL git curl python3 "$EMACS_PKG"
 cp "$REPO/gitconfig" ~/.gitconfig
 git config --global user.email "holden@pigscanfly.ca"
 git config --global user.name "Holden Karau"
+# New clones pick up git-templates/hooks/commit-msg (Spark co-author trailer).
+git config --global init.templateDir "$REPO/git-templates"
 
 # Docker: wanted on headless dev boxes too, not just desktops.
 if [ "$FAMILY" = debian ]; then

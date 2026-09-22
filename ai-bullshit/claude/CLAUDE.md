@@ -211,13 +211,16 @@ Ask before any external operation (push, PR, GitHub comment).
 
 ## Co-author trailer on her own branches
 
-After committing on one of Holden's own branches (her fork's branches, not
-upstream, not someone else's PR), run `add_coauthor.sh` from `~/bin` before
-the first push. It rewrites the branch's commits to add the
-`Co-authored-by: Holden Karau <holden@pigscanfly.ca>` trailer where missing
-and needs `git filter-repo`. Because it rewrites history: never on an
-already-pushed branch -- that would force the banned force-push. There, add
-the trailer to new commit messages directly instead.
+Commits in Spark worktrees get the
+`Co-authored-by: Holden Karau <holden@pigscanfly.ca>` trailer automagically
+via a commit-msg hook (dotfiles `git-templates/hooks/commit-msg`, gated on
+`project/SparkBuild.scala`, uses `add_coauthor.py`). New clones get it from
+`init.templateDir` (set by `setup-shared`); older worktrees opt in once with
+`git config core.hooksPath ~/mydotfiles/git-templates/hooks`. For commits
+that predate the hook, run `add_coauthor.sh` from `~/bin` before the first
+push -- it rewrites history with `git filter-repo`, so never on an
+already-pushed branch (that would force the banned force-push); add the
+trailer to new commit messages directly there.
 
 ## Long-running builds and tests
 

@@ -1,0 +1,27 @@
+#!/bin/bash
+# commit-msg hook: in Spark worktrees, append the
+# Co-authored-by: Holden Karau <holden@pigscanfly.ca> trailer via the
+# franktheunicorn add_coauthor.py filter. Installed into new clones by
+# init.templateDir (setup-shared sets it); older worktrees can opt in with
+#   git config core.hooksPath <dotfiles>/git-templates/hooks
+# Fail-open everywhere: a trailer hook should never block a commit.
+
+msg_file=$1
+
+# Chain to a repo-local commit-msg hook when we were invoked via
+# core.hooksPath and a different one exists. The readlink compare guards
+# against re-invoking ourselves when templateDir copied us into .git/hooks.
+self=$(readlink -f "$0")
+local_hook="$(git rev-parse --git-common-dir)/hooks/commit-msg"
+if [ -x "$local_hook" ] && [ "$(readlink -f "$local_hook")" != "$self" ]; then
+  "$local_hook" "$@"
+fi
+
+# Spark worktrees only -- the hook has no idea whose branch this is, it
+# fires on every commit made here.
+toplevel=$(git rev-parse --show-toplevel) || exit 0
+[ -f "$toplevel/project/SparkBuild.scala" ] || exit 0
+
+command -v add_coauthor.py >/dev/null 2>&1 || exit 0
+add_coauthor.py < "$msg_file" > "$msg_file.tmp" && mv "$msg_file.tmp" "$msg_file"
+exit 0
