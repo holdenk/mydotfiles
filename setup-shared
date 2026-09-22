@@ -1,0 +1,110 @@
+#!/bin/bash
+# Shared machine setup, sourced by setup-minimal-ws and setup-full (also
+# runnable directly). Everything here is wanted on every box, headless or
+# desktop: distro detection, core packages, git identity, docker, ~/bin +
+# the ai-bullshit agent configs, and the franktheunicorn tools. Heavy
+# toolchains (conda, sbt, spark pip deps) and desktop packages live in
+# setup-full.
+set -euo pipefail
+set -x
+
+# BASH_SOURCE so this resolves the repo even when sourced from another cwd.
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+. /etc/os-release
+case " ${ID:-} ${ID_LIKE:-} " in
+  *debian*|*ubuntu*)
+    FAMILY=debian
+    PKG_UPDATE="sudo apt-get update"
+    PKG_INSTALL="sudo apt-get install -y"
+    EMACS_PKG=emacs-nox
+    ;;
+  *rhel*|*fedora*|*amzn*)
+    FAMILY=rh
+    PKG_UPDATE="sudo dnf makecache"
+    PKG_INSTALL="sudo dnf install -y"
+    EMACS_PKG=emacs-nw
+    ;;
+  *)
+    echo "Unknown distro family: ID=${ID:-?} ID_LIKE=${ID_LIKE:-?}" >&2
+    exit 1
+    ;;
+esac
+
+$PKG_UPDATE
+$PKG_INSTALL git curl python3 "$EMACS_PKG"
+
+cp "$REPO/gitconfig" ~/.gitconfig
+git config --global user.email "holden@pigscanfly.ca"
+git config --global user.name "Holden Karau"
+
+# Docker: wanted on headless dev boxes too, not just desktops.
+if [ "$FAMILY" = debian ]; then
+  $PKG_INSTALL apt-transport-https ca-certificates curl gnupg
+  sudo install -m 0755 -d /etc/apt/keyrings
+  sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+  sudo tee /etc/apt/sources.list.d/docker.sources <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
+Components: stable
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+
+  $PKG_UPDATE
+  $PKG_INSTALL docker-ce docker-ce-cli containerd.io
+else
+  $PKG_INSTALL docker
+  sudo systemctl enable --now docker || true
+fi
+sudo usermod -aG docker "$USER"
+
+# Symlink the helper scripts and agent configs into place. Fails loudly
+# rather than overwriting if one of these already exists as a real file/dir.
+ln -sfn "$REPO/bin" ~/bin
+mkdir -p ~/.cursor ~/.claude
+ln -sfn "$REPO/ai-bullshit/AGENTS.md" ~/AGENTS.md
+ln -sfn "$REPO/ai-bullshit/cursor-rules" ~/.cursor/rules
+ln -sfn "$REPO/ai-bullshit/cursor-hooks" ~/.cursor/hooks
+ln -sfn "$REPO/ai-bullshit/cursor-hooks.json" ~/.cursor/hooks.json
+ln -sfn "$REPO/ai-bullshit/claude/CLAUDE.md" ~/.claude/CLAUDE.md
+ln -sfn "$REPO/ai-bullshit/claude/rules" ~/.claude/rules
+
+# franktheunicorn tools: clone and symlink everything in tools/ into ~/bin.
+# ~/bin is a symlink into this repo, so the tool names are listed in
+# .gitignore -- add new ones there when tools/ grows them.
+FRANK_DIR=~/franktheunicorn
+if [ -d "$FRANK_DIR/.git" ]; then
+  git -C "$FRANK_DIR" pull --ff-only
+else
+  git clone https://github.com/franktheunicorn/franktheunicorn "$FRANK_DIR"
+fi
+for tool in "$FRANK_DIR"/tools/*; do
+  [ -f "$tool" ] || continue
+  chmod +x "$tool"
+  ln -sfn "$tool" ~/bin/"$(basename "$tool")"
+done
+
+# add_coauthor.sh rewrites commit messages with git filter-repo.
+if ! command -v git-filter-repo >/dev/null 2>&1; then
+  $PKG_INSTALL git-filter-repo || python3 -m pip install --user git-filter-repo || \
+    echo "WARNING: git-filter-repo not installed; add_coauthor.sh needs it" >&2
+fi
+
+# The cursor hooks are fail-closed: if the scripts are missing or not
+# executable, every tool call is blocked. Git keeps the exec bit, but a
+# checkout that loses it bricks the agent, so set it explicitly and smoke
+# test each hook before declaring done.
+chmod +x "$REPO/ai-bullshit/cursor-hooks/"*.sh
+for hook in block-rm-rf block-secrets inject-global-rules; do
+  out=$(echo '{}' | "$REPO/ai-bullshit/cursor-hooks/$hook.sh") || {
+    echo "Hook $hook.sh failed to run -- fix this before using the agent" >&2
+    exit 1
+  }
+  echo "$out" | python3 -c 'import json,sys; json.load(sys.stdin)' || {
+    echo "Hook $hook.sh did not emit valid JSON" >&2
+    exit 1
+  }
+done

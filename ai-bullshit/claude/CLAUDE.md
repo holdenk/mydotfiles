@@ -22,7 +22,7 @@ Helper tools: `~/bin` symlinks the dotfiles `bin/` (`with-test-lock`,
 `merge_branches.py`, `squash-magic.sh`, `update-bases.sh`) come from
 https://github.com/franktheunicorn/franktheunicorn, cloned to
 `~/franktheunicorn` with `tools/*` symlinked into `~/bin` by
-`setup-minimal-ws`.
+`setup-shared`.
 
 ## Tell me when you are fucking done
 

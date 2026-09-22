@@ -33,4 +33,4 @@ Two things the rules assume about every machine:
 - `$HOME` varies: the account is `holden`, `hkarau`, or `holdenkarau`
   (`/Users/<account>` on Mac). Rules use `~` -- keep it that way.
 - `~/bin` also carries the franktheunicorn tools (`add_coauthor.sh` etc.),
-  symlinked from `~/franktheunicorn/tools/` by `setup-minimal-ws`.
+  symlinked from `~/franktheunicorn/tools/` by `setup-shared`.

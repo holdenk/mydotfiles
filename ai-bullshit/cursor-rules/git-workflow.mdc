@@ -68,4 +68,4 @@ already-pushed branch -- that would force the banned force-push. There, add
 the trailer to new commit messages directly instead.
 
 `add_coauthor.sh` comes from the franktheunicorn tools
-(`~/franktheunicorn/tools/`, symlinked into `~/bin` by `setup-minimal-ws`).
+(`~/franktheunicorn/tools/`, symlinked into `~/bin` by `setup-shared`).

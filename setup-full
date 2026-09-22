@@ -1,10 +1,19 @@
+#!/bin/bash
+# Full desktop setup: the shared core (setup-shared) plus heavy toolchains
+# (conda, sbt, spark pip deps), mypackages, and desktop-only packages.
+# Everything below the shared core is Debian/Ubuntu-only.
 set -x
 set -e
+source "$(dirname "$0")/setup-shared"
+if [ "${FAMILY:-}" != "debian" ]; then
+  echo "setup-full past the shared core is Debian/Ubuntu-only; stopping." >&2
+  exit 0
+fi
 # sudo add-apt-repository -y ppa:openjdk-r/ppa
 sudo apt-get install aptitude
 
-if [ ! -z "$SERVER" ]; then
-   # Install etcher
+if [ -z "${SERVER:-}" ]; then
+   # Install etcher (desktop imaging tool; skipped on servers)
    echo "deb https://deb.etcher.io stable etcher" | sudo tee /etc/apt/sources.list.d/balena-etcher.list
 fi
 sudo add-apt-repository -y ppa:apt-fast/stable
@@ -17,20 +26,8 @@ sudo apt-get install -y \
     curl \
     gnupg-agent \
     software-properties-common
-sudo install -m 0755 -d /etc/apt/keyrings
-sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-sudo chmod a+r /etc/apt/keyrings/docker.asc
-
-sudo tee /etc/apt/sources.list.d/docker.sources <<EOF
-Types: deb
-URIs: https://download.docker.com/linux/ubuntu
-Suites: $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
-Components: stable
-Signed-By: /etc/apt/keyrings/docker.asc
-EOF
 
 sudo apt-fast update && sudo apt-get -y upgrade
-sudo apt-get install -y docker-ce docker-ce-cli containerd.io
 
 # Install packages from mypackages with graceful fallback
 echo "Checking package availability from mypackages..."
@@ -62,7 +59,7 @@ if [ -n "$AVAILABLE_PACKAGES" ]; then
   sudo apt-fast install -y $AVAILABLE_PACKAGES
 fi
 
-if [ -z "$SERVER" ]; then
+if [ -z "${SERVER:-}" ]; then
    echo "Checking desktop package availability from mydesktoppackages..."
    AVAILABLE_DESKTOP_PACKAGES=""
    SKIPPED_DESKTOP_PACKAGES=""
@@ -103,15 +100,10 @@ fi
 #source ~/beam_py3_env/bin/activate
 #pip install -r beam_req.txt
 #deactivate
-cp gitconfig ~/.gitconfig
-git config --global user.email "holden@pigscanfly.ca"
-git config --global user.name "Holden Karau"
 set -ex
-# Set up conda/mamba
+# Set up conda/mamba. uname -m is x86_64 or aarch64 and those are the names
+# miniforge uses -- no remapping.
 export arch=$(uname -m)
-if [ "$arch" == "aarm64" ]; then
-  arch="arm64";
-fi
 # Check if conda already exists and upgrade it if present
 if [ -d "/opt/conda" ] && [ -x "/opt/conda/bin/conda" ]; then
   echo "Conda already exists, upgrading..."
@@ -167,17 +159,17 @@ for env in py310 py311 py312; do
     fi
 done
 
-# Add user to docker
-sudo usermod -aG docker $USER
-
 # Install protolint
 go install github.com/yoheimuta/protolint/cmd/protolint@latest
 
-# Install kubectl
-curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+# Install kubectl (upstream publishes amd64/arm64)
+K8S_ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/${K8S_ARCH}/kubectl"
 sudo mv kubectl /bin/
 
-# Install OBS
-sudo add-apt-repository ppa:obsproject/obs-studio
-sudo apt update
-sudo apt install obs-studio
+# Install OBS (desktop only)
+if [ -z "${SERVER:-}" ]; then
+  sudo add-apt-repository -y ppa:obsproject/obs-studio
+  sudo apt update
+  sudo apt install -y obs-studio
+fi

@@ -23,7 +23,7 @@ home", nothing more.
 
 https://github.com/franktheunicorn/franktheunicorn is cloned to
 `~/franktheunicorn` and everything in its `tools/` dir is symlinked into
-`~/bin` by `setup-minimal-ws` (`add_coauthor.sh`, `merge_branches.py`,
+`~/bin` by `setup-shared` (`add_coauthor.sh`, `merge_branches.py`,
 `squash-magic.sh`, `update-bases.sh`, ...).
 
 ## Tell me when you are fucking done

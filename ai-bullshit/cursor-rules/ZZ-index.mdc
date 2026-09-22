@@ -42,7 +42,7 @@ out to an agent.
 Also in `~/bin`: the franktheunicorn tools (`add_coauthor.sh`,
 `merge_branches.py`, `squash-magic.sh`, `update-bases.sh`), symlinked from
 `~/franktheunicorn/tools/` -- https://github.com/franktheunicorn/franktheunicorn
-cloned there by `setup-minimal-ws`. The symlinks live inside the dotfiles
+cloned there by `setup-shared`. The symlinks live inside the dotfiles
 `bin/` via the `~/bin` symlink, so their names are gitignored.
 Shared lock helper (same path Claude uses):
 
