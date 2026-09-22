@@ -12,13 +12,21 @@ here, so each file is self-contained.
 Do not copy any of this into a repo's `AGENTS.md` / `CLAUDE.md`. In
 apache/spark worktrees those files are tracked upstream.
 
+## Home directory varies by machine
+
+The account is `holden`, `hkarau`, or `holdenkarau` depending on the box,
+and on a Mac `$HOME` is `/Users/<account>`, not `/home/<account>`. Never
+hardcode a literal home (`/home/hkarau` etc.) in instructions or scripts --
+use `~` / `$HOME`. Notes that still say `/home/hkarau` mean "this box's
+home", nothing more.
+
 | File | When |
 |---|---|
 | `style.mdc` | always -- voice, done-ness, where hacks belong |
 | `defer-items.mdc` | always -- defer requests write `~/defered_items/projects/<date>_<desc>.md` |
 | `always-run-tests.mdc` | always -- run tests, `/tmp/test-lock` (3 slots), Scala rebuild, `spark-presend` before push |
 | `verify-and-review.mdc` | always -- claims, cross-review |
-| `git-workflow.mdc` | always -- merge/rebuild/test/push, no amend after push |
+| `git-workflow.mdc` | always -- merge/rebuild/test/push, no amend after push, coauthor trailer on her own branches |
 | `spark-pyspark.mdc` | Spark worktrees -- venv, how to run tests |
 | `spark-conventions.mdc` | Spark worktrees -- security JIRA exception, Closed vs Merged, PR scope |
 | `spark-security-jira.mdc` | always -- no hole-describing tickets; innocuous titles maybe |
@@ -30,6 +38,12 @@ find each other by resolving their own path, so repo moves never stale the
 cross-references. No AI in them -- all result parsing is static (regex over
 sbt/unittest output); if a parse gap shows up, fix the parser, do not shell
 out to an agent.
+
+Also in `~/bin`: the franktheunicorn tools (`add_coauthor.sh`,
+`merge_branches.py`, `squash-magic.sh`, `update-bases.sh`), symlinked from
+`~/franktheunicorn/tools/` -- https://github.com/franktheunicorn/franktheunicorn
+cloned there by `setup-minimal-ws`. The symlinks live inside the dotfiles
+`bin/` via the `~/bin` symlink, so their names are gitignored.
 Shared lock helper (same path Claude uses):
 
     bash ~/bin/with-test-lock -- <build-or-test-command>

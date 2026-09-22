@@ -27,3 +27,10 @@ Shared lock helper (same path Claude uses):
 `~/AGENTS.md` points here so ancestor-walking agents load the same instructions.
 A `sessionStart` hook in `~/.cursor/hooks.json` injects the always-apply rules.
 `~/.cursor/cli-config.json` mirrors Claude's deny list and status line.
+
+Two things the rules assume about every machine:
+
+- `$HOME` varies: the account is `holden`, `hkarau`, or `holdenkarau`
+  (`/Users/<account>` on Mac). Rules use `~` -- keep it that way.
+- `~/bin` also carries the franktheunicorn tools (`add_coauthor.sh` etc.),
+  symlinked from `~/franktheunicorn/tools/` by `setup-minimal-ws`.

@@ -9,6 +9,21 @@ Cursor's split copy is `~/.cursor/rules/`. This file is Claude's. Do not
 dual-write into a git repo -- in apache/spark worktrees `CLAUDE.md` is a
 symlink to `AGENTS.md` and both are tracked upstream.
 
+## Home directory varies by machine
+
+The account is `holden`, `hkarau`, or `holdenkarau` depending on the box,
+and on a Mac `$HOME` is `/Users/<account>`, not `/home/<account>`. Never
+hardcode a literal home (`/home/hkarau` etc.) in instructions or scripts --
+use `~` / `$HOME`. Notes that still say `/home/hkarau` mean "this box's
+home", nothing more.
+
+Helper tools: `~/bin` symlinks the dotfiles `bin/` (`with-test-lock`,
+`spark-presend`, ...). The franktheunicorn tools (`add_coauthor.sh`,
+`merge_branches.py`, `squash-magic.sh`, `update-bases.sh`) come from
+https://github.com/franktheunicorn/franktheunicorn, cloned to
+`~/franktheunicorn` with `tools/*` symlinked into `~/bin` by
+`setup-minimal-ws`.
+
 ## Tell me when you are fucking done
 
 Don't make me guess.
@@ -194,6 +209,16 @@ squash later.
 
 Ask before any external operation (push, PR, GitHub comment).
 
+## Co-author trailer on her own branches
+
+After committing on one of Holden's own branches (her fork's branches, not
+upstream, not someone else's PR), run `add_coauthor.sh` from `~/bin` before
+the first push. It rewrites the branch's commits to add the
+`Co-authored-by: Holden Karau <holden@pigscanfly.ca>` trailer where missing
+and needs `git filter-repo`. Because it rewrites history: never on an
+already-pushed branch -- that would force the banned force-push. There, add
+the trailer to new commit messages directly instead.
+
 ## Long-running builds and tests
 
 `BASH_DEFAULT_TIMEOUT_MS` is 10 min; Spark builds and full test suites
@@ -213,7 +238,8 @@ to mistake for your own run.
 
 ## Shared Python venv -- installs are global
 
-Every Spark worktree's `.venv` was created as `/home/hkarau/spark/.venv`, so
+Every Spark worktree's `.venv` was created as `~/spark/.venv` (use `~` --
+the account name varies by machine, see "Home directory varies" above), so
 activating any of them puts that ONE venv on `PATH`. A `pip install` /
 `pip uninstall` in one worktree silently changes every other worktree.
 Check `python -c "import X; print(X.__file__)"` before concluding a package

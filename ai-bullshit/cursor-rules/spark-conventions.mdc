@@ -32,6 +32,9 @@ alwaysApply: true
  `dev/pr_merge_status.py <pr>` -- never read Closed as rejected.
 - Keep PR scope to what was asked. Note adjacent problems; do not fix them in
  the same PR unless told to.
+- After committing on her own branches, run `add_coauthor.sh` (`~/bin`) before
+ the first push to add the co-author trailer -- details in
+ `git-workflow.mdc`. Never on an already-pushed branch.
 - **Backporting a new conf to a pre-4.2 branch: drop the binding policy.**
  `ConfigBuilder.withBindingPolicy(...)` / `ConfigBindingPolicy` exist only on
  4.2+ (master, branch-4.x/4.3/4.2). When a conf added on master is backported

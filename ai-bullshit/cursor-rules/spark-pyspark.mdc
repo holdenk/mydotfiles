@@ -24,8 +24,10 @@ mistake for your own run.
 
 ## Shared Python venv -- installs are global
 
-Every Spark worktree's `.venv` was created as `/home/hkarau/spark/.venv`, so
-activating any of them puts that ONE venv on `PATH`. A `pip install` /
+Every Spark worktree's `.venv` was created as `~/spark/.venv` (use `~` --
+the account is `holden`/`hkarau`/`holdenkarau` depending on the box, and
+`/Users/<account>` on Mac; see `ZZ-index.mdc`), so activating any of them
+puts that ONE venv on `PATH`. A `pip install` /
 `pip uninstall` in one worktree silently changes every other worktree. Check
 `python -c "import X; print(X.__file__)"` before concluding a package is
 missing, and say so before uninstalling anything.

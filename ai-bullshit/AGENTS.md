@@ -11,6 +11,21 @@ dual-write into a git repo.
 If those rules are not already in context, read every `alwaysApply: true` file
 under `~/.cursor/rules/` before doing anything else.
 
+## Home directory varies by machine
+
+The account is `holden`, `hkarau`, or `holdenkarau` depending on the box,
+and on a Mac `$HOME` is `/Users/<account>`, not `/home/<account>`. Never
+hardcode a literal home (`/home/hkarau` etc.) in instructions or scripts --
+use `~` / `$HOME`. Notes that still say `/home/hkarau` mean "this box's
+home", nothing more.
+
+## franktheunicorn tools
+
+https://github.com/franktheunicorn/franktheunicorn is cloned to
+`~/franktheunicorn` and everything in its `tools/` dir is symlinked into
+`~/bin` by `setup-minimal-ws` (`add_coauthor.sh`, `merge_branches.py`,
+`squash-magic.sh`, `update-bases.sh`, ...).
+
 ## Tell me when you are fucking done
 
 Don't make me guess.
@@ -63,6 +78,16 @@ a run whenever a Spark task looks done and code changed; pure doc changes
 are exempt (it no-ops on doc-only diffs). `--dry-run` runs static checks
 only, `--skip-build` when the jar is current, `--base <ref>` for release
 branches.
+
+## Co-author trailer on her own branches
+
+After committing on one of Holden's own branches (her fork's branches, not
+upstream, not someone else's PR), run `add_coauthor.sh` from `~/bin` before
+the first push. It rewrites the branch's commits to add the
+`Co-authored-by: Holden Karau <holden@pigscanfly.ca>` trailer where missing
+and needs `git filter-repo`. Because it rewrites history: never on an
+already-pushed branch -- that would force the banned force-push. There, add
+the trailer to new commit messages directly instead.
 
 ## Do not file a JIRA that describes a security hole
 

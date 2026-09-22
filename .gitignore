@@ -38,3 +38,12 @@ tramp
 
 # elpa packages
 /elpa/
+
+# franktheunicorn tool symlinks dropped into bin/ by setup-minimal-ws
+# (~/bin symlinks here). Add new entries when tools/ grows one.
+/bin/add_coauthor.py
+/bin/add_coauthor.sh
+/bin/merge_branches.py
+/bin/squash-magic.sh
+/bin/test_merge_branches.py
+/bin/update-bases.sh

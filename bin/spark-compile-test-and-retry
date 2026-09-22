@@ -128,7 +128,7 @@ def find_root():
 
 def find_venv_python(root):
     for cand in (Path(root) / ".venv" / "bin" / "python",
-                 Path("/home/hkarau/spark/.venv/bin/python")):
+                 Path.home() / "spark" / ".venv" / "bin" / "python"):
         if cand.exists():
             return str(cand)
     return shutil.which("python3") or die("no python found")

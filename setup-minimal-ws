@@ -44,6 +44,27 @@ ln -sfn "$REPO/ai-bullshit/cursor-hooks.json" ~/.cursor/hooks.json
 ln -sfn "$REPO/ai-bullshit/claude/CLAUDE.md" ~/.claude/CLAUDE.md
 ln -sfn "$REPO/ai-bullshit/claude/rules" ~/.claude/rules
 
+# franktheunicorn tools: clone and symlink everything in tools/ into ~/bin.
+# ~/bin is a symlink into this repo, so the tool names are listed in
+# .gitignore -- add new ones there when tools/ grows them.
+FRANK_DIR=~/franktheunicorn
+if [ -d "$FRANK_DIR/.git" ]; then
+  git -C "$FRANK_DIR" pull --ff-only
+else
+  git clone https://github.com/franktheunicorn/franktheunicorn "$FRANK_DIR"
+fi
+for tool in "$FRANK_DIR"/tools/*; do
+  [ -f "$tool" ] || continue
+  chmod +x "$tool"
+  ln -sfn "$tool" ~/bin/"$(basename "$tool")"
+done
+
+# add_coauthor.sh rewrites commit messages with git filter-repo.
+if ! command -v git-filter-repo >/dev/null 2>&1; then
+  $PKG_INSTALL git-filter-repo || python3 -m pip install --user git-filter-repo || \
+    echo "WARNING: git-filter-repo not installed; add_coauthor.sh needs it" >&2
+fi
+
 # The cursor hooks are fail-closed: if the scripts are missing or not
 # executable, every tool call is blocked. Git keeps the exec bit, but a
 # checkout that loses it bricks the agent, so set it explicitly and smoke

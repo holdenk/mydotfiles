@@ -56,3 +56,16 @@ not claim a committer would prefer a squash, and do not volunteer to squash
 later.
 
 Ask before any external operation (push, PR, GitHub comment).
+
+## Co-author trailer on her own branches
+
+After committing on one of Holden's own branches (her fork's branches, not
+upstream, not someone else's PR), run `add_coauthor.sh` from `~/bin` before
+the first push. It rewrites the branch's commits to add the
+`Co-authored-by: Holden Karau <holden@pigscanfly.ca>` trailer where missing
+and needs `git filter-repo`. Because it rewrites history: never on an
+already-pushed branch -- that would force the banned force-push. There, add
+the trailer to new commit messages directly instead.
+
+`add_coauthor.sh` comes from the franktheunicorn tools
+(`~/franktheunicorn/tools/`, symlinked into `~/bin` by `setup-minimal-ws`).
