@@ -1,0 +1,683 @@
+#!/usr/bin/env python3
+"""
+spark-presend -- the "am I ready to open/update this PR" gate for Spark.
+
+Three phases, in order, each gated on the previous (override with --force):
+
+  1. static   Fast checks on the diff vs the PR's base branch: config-flag
+              versions vs the base branch's actual version (the SPARK-52611
+              class of mistake), .withBindingPolicy on new confs where the
+              base enforces it, duplicate conf definitions, license headers
+              on new files, commit-subject hygiene, migration-guide and
+              deps-manifest reminders, leftover debug statements.
+  2. lint     dev/check-license plus dev/lint-scala / lint-java / lint-python /
+              lint-r / lint-js / structured_logging_style.py, for the languages
+              the diff touches, under the shared test lock.
+  3. tests    spark-compile-test-and-retry --base <base>: ALL the tests by
+              default (every SBT module + every PySpark test module, days),
+              with per-failed-test retries (flakes vs real). --modules and
+              --fast trade coverage for time.
+
+Base branch resolution, first hit wins: --base arg, the open PR for this
+branch on apache/spark (gh), a version embedded in the branch name that
+matches an upstream branch, else master.
+
+Usage:
+  spark-presend                     # static + lint + ALL the tests (days)
+  spark-presend --modules           # static + lint + touched modules' suites
+  spark-presend --fast              # static + lint + diff-derived suites only
+  spark-presend --dry-run           # resolve base + run static checks only
+  spark-presend --skip-tests        # static + lint
+  spark-presend --base branch-3.5   # explicit base
+  spark-presend --mima              # also run dev/mima (binary compat)
+"""
+
+import argparse
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+LOCK_HELPER = os.path.expanduser("~/my-scripts/with-test-lock")
+TEST_RUNNER = os.path.expanduser("~/my-scripts/spark-compile-test-and-retry")
+NOW = time.strftime("%Y%m%d-%H%M%S")
+
+# Conf builders used across Spark: SQLConf.buildConf, StaticSQLConf.buildStaticConf,
+# ConfigBuilder everywhere else (core, network, ...). TypedConfigBuilder is
+# deliberately absent: it never takes a string literal in the tree.
+BUILDER = r"(?:ConfigBuilder|buildConf|buildStaticConf)"
+CONF_BUILDER = re.compile(BUILDER + r"\(\s*\"([^\"]+)\"")
+CONF_ENTRY = re.compile(
+    BUILDER + r"\(\s*\"(?P<key>[^\"]+)\"\)"
+    r"(?P<body>.*?)(?:\.createWithDefault|\.createOptional|\.createWithDefaultFunction)",
+    re.S)
+CONF_VERSION = re.compile(r"\.version\(\s*\"([0-9]+\.[0-9]+(?:\.[0-9]+)?)\"\s*\)")
+CONF_ANY_VERSION = re.compile(r"\.version\(\s*\"([^\"]+)\"\s*\)")
+CONF_DOC = re.compile(r"\.doc\(")
+CONF_BINDING = re.compile(r"\.withBindingPolicy\(")
+# A spark.* dotted conf key inside a string literal (3+ segments, may be a
+# prefix of a longer string like "spark.foo.bar=true ...").
+CONF_REF = re.compile(r"\"(spark\.[a-z0-9]+(?:\.[a-zA-Z0-9]+){2,})")
+# Where the frozen binding-policy exceptions list lives.
+BINDING_EXCEPTIONS = "binding-policy-exceptions"
+
+# .sql is out on purpose: RAT excludes it (dev/.rat-excludes) and golden
+# sql-tests files carry no header. dev/check-license (the real RAT) runs in
+# the lint phase for everything else.
+CODE_EXTS = {".scala", ".java", ".py", ".sh", ".r", ".R", ".js", ".ts"}
+LICENSE_NEEDLE = "Licensed to the Apache Software Foundation"
+
+results = {"error": [], "warn": [], "info": []}
+
+
+def say(msg):
+    print(f"[presend {time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+def die(msg, code=2):
+    say(f"FATAL: {msg}")
+    sys.exit(code)
+
+
+def report(level, msg):
+    results[level].append(msg)
+    say(f"{level.upper()}: {msg}")
+
+
+def git(root, *args, check=True):
+    p = subprocess.run(["git", *args], cwd=root,
+                       capture_output=True, text=True, errors="replace")
+    if check and p.returncode != 0:
+        die(f"git {' '.join(args)} failed: {p.stderr.strip()}")
+    return p
+
+
+# --- base branch + version ---------------------------------------------------
+
+def detect_base(root, requested):
+    if requested:
+        return requested
+    branch = git(root, "branch", "--show-current").stdout.strip()
+    if not branch:
+        die("detached HEAD and no --base given; check out a branch first")
+    try:
+        # No --author @me: it switches --head to prefix matching and a
+        # same-named backport branch (foo-4.x-r2) wins over the exact match.
+        gh = subprocess.run(
+            ["gh", "pr", "list", "--repo", "apache/spark", "--head", branch,
+             "--state", "open", "--json", "baseRefName,headRefName"],
+            capture_output=True, text=True, timeout=20)
+        if gh.returncode == 0 and gh.stdout.strip():
+            import json
+            for pr in json.loads(gh.stdout):
+                if pr["headRefName"] == branch:
+                    return pr["baseRefName"]
+    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError):
+        pass  # no gh / no network -- fall through to the branch-name heuristic
+    # Both an explicit "branch-N.M" and any bare N.M / N.x in the name are
+    # candidates; first one that exists as an upstream branch wins (so
+    # ivy2.5.3 doesn't resolve to 2.5, and foo-branch-9.9-4.0 finds 4.0).
+    candidates = re.findall(r"branch-[0-9]+\.[0-9x]+", branch) + [
+        "branch-" + v for v in re.findall(r"[0-9]+\.[0-9x]+", branch)]
+    for c in candidates:
+        if git(root, "rev-parse", "--verify", "--quiet",
+               f"refs/remotes/upstream/{c}", check=False).returncode == 0:
+            return c
+    return "master"
+
+
+def base_version(root, base_ref):
+    """The version a new conf should carry on this base: the branch's own
+    pom version minus -SNAPSHOT (master: 5.0.0, branch-4.x: 4.4.0,
+    branch-3.5: 3.5.10, ...)."""
+    pom = git(root, "show", f"{base_ref}:pom.xml").stdout
+    pom = re.sub(r"<parent>.*?</parent>", "", pom, flags=re.S)
+    m = re.search(r"<version>([0-9]+\.[0-9]+\.[0-9]+)(?:-SNAPSHOT)?</version>", pom)
+    if not m:
+        die(f"could not parse project version from {base_ref}:pom.xml")
+    return tuple(int(x) for x in m.group(1).split("."))
+
+
+def parse_version(s):
+    """'3.5' -> (3, 5, 0); '3.5.10' -> (3, 5, 10). Two-part versions exist in
+    real SQLConf entries, so accept and pad."""
+    parts = s.split(".")
+    return tuple(int(x) for x in parts) + (0,) * (3 - len(parts))
+
+
+def vstr(v):
+    return ".".join(str(x) for x in v)
+
+
+def has_binding_policy_api(root, base_ref):
+    """withBindingPolicy exists on master/4.x/4.3/4.2 but not 4.1/4.0/3.5;
+    where it exists, SparkConfigBindingPolicySuite rejects new confs that
+    don't declare a policy (the exceptions list is frozen)."""
+    return git(root, "grep", "-q", "def withBindingPolicy", base_ref,
+               check=False).returncode == 0
+
+
+# --- diff --------------------------------------------------------------------
+
+def collect_diff(root, base_ref):
+    mb = git(root, "merge-base", "HEAD", base_ref).stdout.strip()
+    names = git(root, "diff", "--name-only", mb).stdout.splitlines()
+    untracked = git(root, "ls-files", "--others", "--exclude-standard") \
+        .stdout.splitlines()
+    new_files = set(git(root, "diff", "--name-only", "--diff-filter=A", mb)
+                    .stdout.splitlines()) | set(untracked)
+    # Added lines per file, for conf/debug/ref scanning. -U0 keeps it small.
+    # added_lines tracks new-file line numbers so conf checks can tell which
+    # entry in a file the diff actually touched.
+    added = {}        # file -> [added line text]
+    added_lines = {}  # file -> set(new-file line numbers)
+    cur = None
+    new_line = 0
+    for line in git(root, "diff", "-U0", mb).stdout.splitlines():
+        # Real +++ headers have a space after +++; an added line whose content
+        # starts with ++ (Scala ++=, Java ++i) does not.
+        if line.startswith("+++ ") or line.startswith('+++"'):
+            h = line[4:].strip().strip('"')
+            cur = h[2:] if h.startswith("b/") else None
+        elif line.startswith("@@") and cur:
+            m = re.search(r"\+(\d+)(?:,(\d+))?", line)
+            new_line = int(m.group(1)) if m else 0
+        elif line.startswith("\\"):
+            continue  # "\ No newline at end of file"
+        elif line.startswith("+") and cur:
+            added.setdefault(cur, []).append(line[1:])
+            added_lines.setdefault(cur, set()).add(new_line)
+            new_line += 1
+        elif not line.startswith("-") and cur:
+            new_line += 1
+    # Untracked files have no diff lines; treat the whole file as added.
+    for f in untracked:
+        try:
+            lines = (Path(root) / f).read_text(errors="replace").splitlines()
+            added.setdefault(f, []).extend(lines)
+            added_lines.setdefault(f, set()).update(range(1, len(lines) + 1))
+        except OSError:
+            pass
+    files = sorted({*names, *untracked} - {""})
+    return mb, files, new_files, added, added_lines
+
+
+# --- static checks -----------------------------------------------------------
+
+def touched_conf_entries(root, added_lines):
+    """All conf entries in changed scala/java files whose span intersects an
+    added line, plus a per-(key, file) count of every entry in those files.
+    The span intersection catches multi-line builder calls and version-only
+    edits; the count catches a second definition of an existing key added in
+    the same file (which the base-dup check alone would wave through as an
+    in-place edit)."""
+    entries = []  # (key, file, body)
+    counts = {}   # (key, file) -> entries in the file
+    for f, touched in added_lines.items():
+        if not f.endswith((".scala", ".java")) or not touched:
+            continue
+        try:
+            text = (Path(root) / f).read_text(errors="replace")
+        except OSError:
+            continue
+        for m in CONF_ENTRY.finditer(text):
+            key = m.group("key")
+            counts[(key, f)] = counts.get((key, f), 0) + 1
+            start = text.count("\n", 0, m.start()) + 1
+            end = text.count("\n", 0, m.end()) + 1
+            if set(range(start, end + 1)) & touched:
+                entries.append((key, f, m.group("body")))
+    return entries, counts
+
+
+def conf_defined_on_base(root, base_ref, key):
+    """Files on the base branch containing a builder call for key. Matching
+    the builder, not just the quoted key, keeps mere references from
+    counting as definitions. git grep is POSIX ERE: no (?:...) or \\s."""
+    p = git(root, "grep", "-E", "-l",
+            r"(ConfigBuilder|buildConf|buildStaticConf)\([[:space:]]*\""
+            + re.escape(key) + "\"",
+            base_ref, "--", "*.scala", "*.java", check=False)
+    if p.returncode == 1:
+        return []
+    if p.returncode != 0:
+        # A failed lookup must not manufacture "new conf" errors; say so and
+        # treat the conf as pre-existing (skips dup/policy checks only).
+        report("warn", f"git grep for conf {key} on {base_ref} failed "
+                       f"({p.stderr.strip()[:80]}); skipping dup/policy checks")
+        return ["?"]
+    return [l.split(":", 1)[1] for l in p.stdout.splitlines()]
+
+
+def check_confs(root, base_ref, base_ver, entries, counts, binding_policy):
+    """Config-flag checks on every conf entry the diff touches. The version
+    must match the branch the conf lands on (SPARK-52611 shipped 4.0.0 on
+    branch-3.5 and had to be fixed to 3.5.1); new confs need a doc and, where
+    the base enforces it, a binding policy; a key already defined elsewhere
+    on the base -- or twice in the same file here -- is a duplicate."""
+    if not entries:
+        say("static: no conf entries touched in the diff")
+        return set()
+    new_keys = {}
+    seen = {}
+    for key, f, body in entries:
+        if key in seen:
+            report("error", f"conf {key}: defined twice in this diff "
+                            f"({seen[key]} and {f})")
+        seen[key] = f
+        if counts.get((key, f), 0) > 1:
+            report("error", f"conf {key}: defined {counts[(key, f)]} times in "
+                            f"{f} -- the second definition shadows the first")
+        base_files = conf_defined_on_base(root, base_ref, key)
+        elsewhere = [bf for bf in base_files if bf != f]
+        if elsewhere:
+            report("error", f"conf {key}: already defined on {base_ref} "
+                            f"({elsewhere[0]}); adding a second definition")
+        if not base_files:
+            new_keys[key] = f
+        vm = CONF_VERSION.search(body)
+        if not vm:
+            any_v = CONF_ANY_VERSION.search(body)
+            if any_v:
+                report("error", f"conf {key}: .version(\"{any_v.group(1)}\") is "
+                                "not X.Y[.Z]")
+            else:
+                report("warn", f"conf {key}: no .version() on the entry")
+        else:
+            cv = parse_version(vm.group(1))
+            if cv > base_ver:
+                report("error",
+                       f"conf {key}: .version(\"{vstr(cv)}\") is newer than base "
+                       f"branch version {vstr(base_ver)} -- on this branch the conf "
+                       f"first ships in {vstr(base_ver)} (see SPARK-52611)")
+            elif cv < base_ver and cv[:2] == base_ver[:2]:
+                report("error",
+                       f"conf {key}: .version(\"{vstr(cv)}\") names an already-cut "
+                       f"{vstr(base_ver[:2])}.x release; this branch is at "
+                       f"{vstr(base_ver)}-SNAPSHOT, use {vstr(base_ver)}")
+            elif cv[:2] != base_ver[:2]:
+                report("warn",
+                       f"conf {key}: .version(\"{vstr(cv)}\") is not on the base "
+                       f"branch's {vstr(base_ver[:2])}.x line (base is "
+                       f"{vstr(base_ver)}) -- fine only if a backport to that line "
+                       "lands first")
+        if not CONF_DOC.search(body):
+            report("warn", f"conf {key}: no .doc(...) on the entry")
+        if not base_files and binding_policy and not CONF_BINDING.search(body):
+            report("error",
+                   f"conf {key}: new conf without .withBindingPolicy(...) -- "
+                   "SparkConfigBindingPolicySuite rejects it and the exceptions "
+                   "list is frozen")
+    if new_keys and not binding_policy:
+        report("info",
+               f"base {base_ref} predates ConfigBindingPolicy (added in 4.2): "
+               "do NOT add .withBindingPolicy(...) on this branch, it does not "
+               "exist here and will not compile. The master/4.x version of the "
+               "conf should carry the policy instead.")
+    return new_keys
+
+
+def check_binding_policy_backport(root, base_ref, added, binding_policy):
+    """Backporting a conf from master to a pre-4.2 branch must DROP the
+    .withBindingPolicy(...) call (and the ConfigBindingPolicy import): the
+    API does not exist there and will not compile. Rare but real -- security
+    backports sometimes add confs."""
+    if binding_policy:
+        return
+    flagged = set()
+    for f, lines in added.items():
+        if not f.endswith((".scala", ".java")) or f in flagged:
+            continue
+        for line in lines:
+            if ".withBindingPolicy(" in line or "ConfigBindingPolicy" in line:
+                report("error",
+                       f"{f}: adds .withBindingPolicy/ConfigBindingPolicy but "
+                       f"base {base_ref} predates ConfigBindingPolicy (4.2) -- "
+                       "drop the call and the import when backporting the conf")
+                flagged.add(f)
+                break
+
+
+def check_conf_refs(root, base_ref, added, handled_keys):
+    """Conf keys the diff *references* (string literals) that exist nowhere on
+    the base branch. Sometimes intentional -- the SPARK-59118 4.x backport
+    names spark.sql.hive.thriftServer.allowIneffectiveDoAs in a log message
+    precisely because the conf only exists in 5.0 -- so INFO, not ERROR."""
+    refs = {}
+    for f, lines in added.items():
+        if not f.endswith((".scala", ".java", ".py", ".md")):
+            continue
+        for line in lines:
+            for m in CONF_REF.finditer(line):
+                refs.setdefault(m.group(1), f)
+    checked = 0
+    for key, f in sorted(refs.items()):
+        if key in handled_keys:
+            continue
+        if checked >= 25:
+            say(f"static: conf-ref check capped at 25; "
+                f"{len(refs) - checked} key(s) unchecked")
+            break
+        checked += 1
+        p = git(root, "grep", "-F", "-l", key, base_ref, check=False)
+        if p.returncode == 1:
+            report("info", f"{f} references conf {key} which is not defined "
+                           f"anywhere on {base_ref} (ok if a deliberate forward "
+                           "reference, wrong if the backport was supposed to add it)")
+        elif p.returncode != 0:
+            report("warn", f"git grep for {key} on {base_ref} failed: "
+                           f"{p.stderr.strip()[:100]}")
+
+
+def check_license_headers(root, new_files):
+    """Fast path only; dev/check-license (real RAT) runs in the lint phase."""
+    for f in sorted(new_files):
+        if Path(f).suffix not in CODE_EXTS:
+            continue
+        try:
+            head = (Path(root) / f).read_text(errors="replace")[:2000]
+        except OSError:
+            continue
+        if not head.strip():
+            continue
+        if LICENSE_NEEDLE not in head:
+            report("error", f"new file {f}: no Apache license header")
+
+
+def check_commits(root, base_ref):
+    subjects = git(root, "log", "--no-merges", "--format=%s",
+                   f"{base_ref}..HEAD").stdout
+    for s in subjects.splitlines():
+        if re.search(r"\b(security|vulnerab|CVE-[0-9-]+|exploit|RCE)\b", s, re.I):
+            report("warn", f"commit subject mentions security: '{s}' -- per "
+                           "workspace rules, no security tags/holes in commit "
+                           "messages; use the ordinary component tag")
+        tags = re.findall(r"\[([^\]]+)\]", s.split("] ")[0] + "]")
+        known = any(re.fullmatch(r"SPARK-[0-9]+|MINOR|BACKPORT|DOCS|TEST|BUILD|WIP",
+                                 t) for t in tags)
+        if not known:
+            report("warn", f"commit subject '{s[:70]}' has no "
+                           "[SPARK-NNNNN]/[MINOR]/... tag -- the PR title check "
+                           "will complain")
+
+
+def check_migration_guide(base, files, new_keys):
+    if base == "master" and new_keys and not any(
+            f.startswith("docs/") and "migration-guide" in f for f in files):
+        report("warn", "new confs on master but no docs/*migration-guide* change "
+                       "-- if any default/behavior changed, reviewers will ask "
+                       "(see SPARK-59404)")
+
+
+def check_build_files(files):
+    if "pom.xml" in files and not any(f.startswith("dev/deps/") for f in files):
+        report("warn", "pom.xml changed without a dev/deps/ manifest update -- "
+                       "run ./dev/test-dependencies.sh if dependencies moved")
+    if any(f.endswith(".proto") for f in files):
+        report("info", "proto files touched: CI runs dev/check-protos.py and "
+                       "protobuf-breaking-changes-check.sh")
+    if any(f.startswith("sql/connect/client/jvm") for f in files):
+        report("info", "connect JVM client touched: CI runs "
+                       "dev/connect-jvm-client-mima-check")
+
+
+def check_debug_leftovers(added):
+    for f, lines in added.items():
+        for line in lines:
+            if re.search(r"\bpdb\.set_trace\(\)|\bbreakpoint\(\)", line) \
+                    and f.endswith(".py"):
+                report("error", f"{f}: leftover debugger call: {line.strip()[:80]}")
+            elif "printStackTrace()" in line and f.endswith((".scala", ".java")):
+                report("warn", f"{f}: printStackTrace() in added code; use logWarning")
+            elif re.search(r"\bprintln\(", line) and f.endswith(".scala") \
+                    and "/src/test/" not in f and not f.startswith("examples/"):
+                report("warn", f"{f}: println in non-test Scala: {line.strip()[:80]}")
+            elif "console.log(" in line and f.endswith(".js"):
+                report("warn", f"{f}: console.log in added JS")
+
+
+# --- lint phase ----------------------------------------------------------------
+
+class LintRunner:
+    def __init__(self, root, logdir):
+        self.root = root
+        self.logdir = logdir
+        self.env = os.environ.copy()
+        for k in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"):
+            self.env.pop(k, None)
+        self.env.update({"SPARK_LOCAL_IP": "127.0.0.1",
+                         "SPARK_LOCAL_HOSTNAME": "localhost"})
+
+    def run(self, name, cmd, timeout_min=60):
+        logfile = self.logdir / f"lint-{name}.log"
+        full = ["bash", LOCK_HELPER, "--"] + cmd \
+            if os.path.exists(LOCK_HELPER) else cmd
+        say(f"+ {' '.join(cmd)}   [log: {logfile}]")
+        with open(logfile, "a") as lf:
+            lf.write(f"$ {' '.join(cmd)}\n")
+            p = subprocess.Popen(full, cwd=self.root, env=self.env,
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                 text=True, start_new_session=True)
+            try:
+                out, _ = p.communicate(timeout=timeout_min * 60)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(p.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                try:
+                    out, _ = p.communicate(timeout=60)
+                except subprocess.TimeoutExpired:
+                    out = ""
+                say(f"TIMEOUT: lint-{name} after {timeout_min}min")
+                lf.write(out or "")
+                return 124, logfile
+            sys.stdout.write(out or "")
+            lf.write(out or "")
+        return p.returncode, logfile
+
+
+def lint_phase(root, logdir, files, changed_py, skip_lint):
+    """Run the repo's own linters for the languages the diff touches, plus
+    RAT (dev/check-license), which CI runs on every PR."""
+    touched = {Path(f).suffix for f in files}
+    jobs = [("license", ["./dev/check-license"])]
+    if ".scala" in touched:
+        jobs.append(("scala", ["./dev/lint-scala"]))
+        if (Path(root) / "dev" / "structured_logging_style.py").exists():
+            jobs.append(("structured-logging",
+                         ["python3", "./dev/structured_logging_style.py"]))
+    if ".java" in touched:
+        jobs.append(("java", ["./dev/lint-java"]))
+    if ".py" in touched or any(f.startswith("python/") for f in files):
+        jobs.append(("python", ["./dev/lint-python"]))
+    if ".R" in touched or ".r" in touched:
+        if shutil.which("Rscript"):
+            jobs.append(("r", ["./dev/lint-r"]))
+        else:
+            say("lint: R files touched but Rscript not on PATH; skipping lint-r")
+    if ".js" in touched:
+        if shutil.which("node"):
+            jobs.append(("js", ["./dev/lint-js"]))
+        else:
+            say("lint: JS files touched but node not on PATH; skipping lint-js")
+    if skip_lint:
+        say(f"lint: SKIPPED (--skip-lint); would run: {[n for n, _ in jobs]}")
+        return True
+
+    runner = LintRunner(root, logdir)
+    ok = True
+    for name, cmd in jobs:
+        rc, logfile = runner.run(name, cmd)
+        if rc == 0:
+            say(f"lint-{name}: OK")
+            continue
+        if name == "python":
+            # lint-python is fail-fast per stage (compile -> custom-errors ->
+            # ruff -> mypy), so mypy errors in the log mean the earlier stages
+            # passed. Local mypy has ~11 pre-existing pandas-stubs drift
+            # errors; only fail when an error lands in a file this diff touched.
+            errs = re.findall(r"^(\S+\.py):\d+: error:",
+                              Path(logfile).read_text(errors="replace"),
+                              flags=re.M)
+            # mypy is invoked on python/... from the repo root, so paths in
+            # the log are repo-relative; the endswith covers either layout.
+            mine = [e for e in errs
+                    if any(c == e or c.endswith("/" + e) for c in changed_py)]
+            if errs and not mine:
+                report("warn", f"lint-python failed but all {len(errs)} mypy "
+                               "errors are in files this diff does not touch "
+                               "(known pandas-stubs drift); not blocking")
+                continue
+        report("error", f"lint-{name} FAILED (rc={rc}); see {logfile}")
+        ok = False
+    return ok
+
+
+# --- main ----------------------------------------------------------------------
+
+def main():
+    ap = argparse.ArgumentParser(
+        prog="spark-presend",
+        description="Pre-send gate for a Spark PR: static checks, lint/style, "
+                    "then ALL the tests via spark-compile-test-and-retry "
+                    "(with per-failed-test retries).")
+    ap.add_argument("--base", help="base branch (default: detect from the open "
+                                   "PR, then the branch name, then master)")
+    speed = ap.add_mutually_exclusive_group()
+    speed.add_argument("--fast", action="store_true",
+                       help="test phase runs diff-derived suites only, for when "
+                            "in a hurry; the default is ALL the tests (days)")
+    speed.add_argument("--modules", action="store_true",
+                       help="test phase runs all suites in touched modules "
+                            "(hours); the middle speed")
+    ap.add_argument("--skip-static", action="store_true")
+    ap.add_argument("--skip-lint", action="store_true")
+    ap.add_argument("--skip-tests", action="store_true")
+    ap.add_argument("--skip-build", action="store_true",
+                    help="pass --skip-build to the test phase (jar is current)")
+    ap.add_argument("--mima", action="store_true",
+                    help="run dev/mima (binary compat) as part of lint")
+    ap.add_argument("--retries", type=int, default=1,
+                    help="per-failed-test retries in the test phase (default 1)")
+    ap.add_argument("--force", action="store_true",
+                    help="run later phases even if an earlier phase is red")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="resolve base and run static checks only")
+    args = ap.parse_args()
+
+    root = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                          capture_output=True, text=True)
+    if root.returncode != 0:
+        die("not inside a git worktree")
+    root = root.stdout.strip()
+    if not (Path(root) / "project" / "SparkBuild.scala").exists():
+        die(f"{root} does not look like a Spark worktree")
+
+    base = detect_base(root, args.base)
+    if git(root, "remote", "get-url", "upstream", check=False).returncode == 0:
+        # Best-effort freshness for the diff base; offline must not block.
+        git(root, "fetch", "--quiet", "upstream", base, check=False)
+    base_ref = f"upstream/{base}" if git(
+        root, "rev-parse", "--verify", "--quiet", f"refs/remotes/upstream/{base}",
+        check=False).returncode == 0 else base
+    bver = base_version(root, base_ref)
+    branch = git(root, "branch", "--show-current").stdout.strip()
+    mb, files, new_files, added, added_lines = collect_diff(root, base_ref)
+    if len(files) > 500 and not args.base:
+        die(f"{len(files)} changed files vs {base_ref} -- the auto-detected "
+            f"base '{base}' is almost certainly wrong (master-based branch "
+            "diffed against a release branch?). Re-run with --base <branch>.")
+
+    logdir = Path(root) / "target" / "presend-logs" / NOW
+    logdir.mkdir(parents=True, exist_ok=True)
+    say(f"worktree: {root}  branch: {branch}")
+    say(f"base: {base} ({base_ref}), branch version {vstr(bver)}, "
+        f"{len(files)} changed file(s)")
+    say(f"logs: {logdir}")
+
+    # --- phase 1: static ---
+    if args.skip_static:
+        say("=== phase 1: static SKIPPED ===")
+    else:
+        say("=== phase 1: static checks ===")
+        entries, counts = touched_conf_entries(root, added_lines)
+        binding_policy = has_binding_policy_api(root, base_ref)
+        new_keys = check_confs(root, base_ref, bver, entries, counts,
+                               binding_policy)
+        check_binding_policy_backport(root, base_ref, added, binding_policy)
+        check_conf_refs(root, base_ref, added, {k for k, _, _ in entries})
+        check_license_headers(root, new_files)
+        check_commits(root, base_ref)
+        check_migration_guide(base, files, new_keys)
+        check_build_files(files)
+        check_debug_leftovers(added)
+        n_err = len(results["error"])
+        say(f"static: {n_err} error(s), {len(results['warn'])} warning(s), "
+            f"{len(results['info'])} info")
+        if n_err and not args.force:
+            say("RESULT: RED (static) -- fix or re-run with --force")
+            return 2
+
+    if args.dry_run:
+        say("dry run: skipping lint and tests")
+        return 0 if not results["error"] else 2
+
+    # --- phase 2: lint/style ---
+    changed_py = [f for f in files if f.endswith(".py")]
+    lint_ok = lint_phase(root, logdir, files, changed_py, args.skip_lint)
+    if args.mima:
+        rc, logfile = LintRunner(root, logdir).run("mima", ["./dev/mima"],
+                                                   timeout_min=120)
+        if rc != 0:
+            report("error", f"dev/mima FAILED; see {logfile} -- add excludes "
+                            "to project/MimaExcludes.scala or drop the "
+                            "public API change from the backport")
+            lint_ok = False
+    elif any(f.endswith((".scala", ".java")) and "/test/" not in f
+             for f in files):
+        report("info", "CI runs dev/mima on every PR; if this adds or changes "
+                       "public API, re-run with --mima to check binary compat "
+                       "locally")
+    if not lint_ok and not args.force:
+        say("RESULT: RED (lint) -- fix or re-run with --force")
+        return 3
+
+    # --- phase 3: tests (ALL of them unless --modules/--fast, with retries) ---
+    if args.skip_tests:
+        say("=== phase 3: tests SKIPPED (--skip-tests) ===")
+    else:
+        if not os.path.exists(TEST_RUNNER):
+            die(f"{TEST_RUNNER} not found; the test phase is "
+                "spark-compile-test-and-retry")
+        cmd = [TEST_RUNNER, "--base", base_ref, "--retries", str(args.retries)]
+        if args.fast:
+            cmd.append("--fast")
+        elif args.modules:
+            cmd.append("--modules")
+        if args.skip_build:
+            cmd.append("--skip-build")
+        say(f"=== phase 3: tests: {' '.join(cmd)} ===")
+        rc = subprocess.run(cmd, cwd=root).returncode
+        if rc != 0:
+            say(f"RESULT: RED (tests, spark-compile-test-and-retry rc={rc})")
+            return 4  # 2/3 are taken by the static/lint phases
+
+    if results["error"]:
+        say(f"RESULT: RED -- {len(results['error'])} static/lint error(s) "
+            "deferred by --force:")
+        for e in results["error"]:
+            say(f"  ERROR {e}")
+        return 1
+    say("RESULT: GREEN -- send it"
+        + (f" ({len(results['warn'])} warnings worth a look)" if results["warn"]
+           else ""))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

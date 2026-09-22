@@ -1,0 +1,807 @@
+#!/usr/bin/env python3
+"""
+spark-compile-test-and-retry -- build + test a Spark branch before pushing.
+
+Run from anywhere inside a Spark worktree. Rebuilds the JVM side, runs the
+suites to completion, then re-runs each failed test on its own so flakes and
+real failures don't get reported as the same thing.
+
+Three speeds:
+  default    ALL the tests: every SBT module's full test phase plus every
+             PySpark test module. Days. This is the pre-push bar.
+  --modules  every suite in every module the diff touches (hours)
+  --fast     only the suites derived from the diff, for when Holden said
+             she is in a hurry
+Explicit suite specs override the speed flags.
+
+Semi-resilient: a failing suite does not stop the run, a crashed SBT gets
+one do-over, and everything lands in target/compile-test-and-retry-logs/<ts>/.
+
+Not done on purpose: scalastyle/lint, R, docs build, MIMA (spark-presend
+covers lint; the rest is CI's job). If the diff is doc-only the script says
+so and exits 0 -- that is the intended exemption, in every speed.
+
+Usage:
+  spark-compile-test-and-retry                    # build + ALL the tests
+  spark-compile-test-and-retry --fast             # build + diff-derived suites
+  spark-compile-test-and-retry --modules          # build + touched modules' suites
+  spark-compile-test-and-retry '*RocksDBSuite*'   # explicit scala suite glob
+  spark-compile-test-and-retry sql/'*RocksDBSuite*'  # explicit module + glob
+  spark-compile-test-and-retry pyspark.sql.tests.test_udf_transpile_unit
+  spark-compile-test-and-retry --skip-build --dry-run
+"""
+
+import argparse
+import fcntl
+import os
+import re
+import resource
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+LOCK_HELPER = os.path.expanduser("~/my-scripts/with-test-lock")
+LOCK_DIR = "/tmp/test-lock"
+LOCK_SLOTS = 3
+
+DOC_ONLY = re.compile(
+    r"(^docs/|^\.github/|^dev/|^LICENSE|^NOTICE|\.md$|\.rst$|\.markdown$)")
+BUILD_FILES = re.compile(r"(^|/)pom\.xml$|^project/|^build\.sbt$|^build/")
+# Known SBT module ids, from BuildCommons in project/SparkBuild.scala. Used to
+# sanity-check the artifactId-derived guess, not as the source of truth.
+KNOWN_MODULES = {
+    "core", "graphx", "mllib", "mllib-local", "repl", "network-common",
+    "network-shuffle", "launcher", "unsafe", "tags", "sketch", "kvstore",
+    "common-utils", "common-utils-java", "variant", "pipelines", "config",
+    "sql-api", "catalyst", "sql", "hive", "hive-thriftserver",
+    "token-provider-kafka-0-10", "sql-kafka-0-10", "avro", "protobuf",
+    "streaming", "streaming-kafka-0-10", "connect-common", "connect",
+    "connect-client-jdbc", "connect-client-jvm", "connect-shims",
+    "udf-worker-proto", "udf-worker-core", "udf-worker-grpc",
+    "kubernetes", "yarn", "hadoop-cloud", "assembly", "examples", "tools",
+}
+
+SUITE_HDR = re.compile(r"^\[info\] ([\w$]+(?:\.[\w$]+)+):\s*$")
+TEST_FAIL = re.compile(r"^\[info\] - (.*?) \*\*\* FAILED \*\*\*")
+FAILED_SUITE_LINE = re.compile(r"^\[error\] \t([\w$]+(?:\.[\w$]+)+)\s*$")
+COMPILE_FAIL = re.compile(r"Compilation failed|error compiling")
+PY_FAIL = re.compile(r"^(?:FAIL|ERROR): (\w+) \(([\w.]+)\)")
+
+# The hypothesis suite is gated: without RUN_HYPOTHESIS=1, 19 of 23 tests
+# skip and the run looks green in ~5s. That is not a green.
+HYPOTHESIS_ENV = {"RUN_HYPOTHESIS": "1", "RUN_HYPOTHESIS_MAX_EXAMPLES": "200"}
+
+NOW = time.strftime("%Y%m%d-%H%M%S")
+
+
+def say(msg):
+    print(f"[ctar {time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+def die(msg, code=2):
+    say(f"FATAL: {msg}")
+    sys.exit(code)
+
+
+class Item:
+    """One runnable test unit: a scala suite glob in an SBT module, or a
+    python unittest spec."""
+
+    def __init__(self, kind, module, pattern, why, env_extra=None):
+        self.kind = kind            # "scala" | "py"
+        self.module = module        # sbt module id | n/a for py
+        self.pattern = pattern      # testOnly glob | dotted unittest spec
+        self.why = why
+        self.env_extra = env_extra or {}
+
+    def name(self):
+        if self.kind == "scala":
+            return f"{self.module}/all-suites" if self.pattern == "--all--" \
+                else f"{self.module}/{self.pattern}"
+        return self.pattern
+
+    def cmd(self, root, venv_py):
+        if self.kind == "scala":
+            if self.pattern == "--all--":
+                return ["build/sbt", "-Phive", f"{self.module}/test"]
+            return ["build/sbt", "-Phive", f"{self.module}/testOnly {self.pattern}"]
+        return [venv_py, "-u", "-m", "unittest", self.pattern]
+
+
+def find_root():
+    try:
+        root = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, check=True).stdout.strip()
+    except subprocess.CalledProcessError:
+        die("not inside a git worktree")
+    if not (Path(root) / "project" / "SparkBuild.scala").exists():
+        die(f"{root} does not look like a Spark worktree (no project/SparkBuild.scala)")
+    return root
+
+
+def find_venv_python(root):
+    for cand in (Path(root) / ".venv" / "bin" / "python",
+                 Path("/home/hkarau/spark/.venv/bin/python")):
+        if cand.exists():
+            return str(cand)
+    return shutil.which("python3") or die("no python found")
+
+
+def scan_modules(root):
+    """Map SBT module id -> module dir, by walking for pom.xml and applying
+    the spark-<artifactId>_2.13 -> id rule. Prunes target/.git/.venv."""
+    modules = {}
+    root_p = Path(root)
+    for dirpath, dirnames, filenames in os.walk(root_p):
+        dirnames[:] = [d for d in dirnames
+                       if d not in ("target", ".git", ".venv", "dist", "node_modules")]
+        if "pom.xml" not in filenames:
+            continue
+        d = Path(dirpath)
+        try:
+            txt = (d / "pom.xml").read_text(errors="replace")[:6000]
+        except OSError:
+            continue
+        txt = re.sub(r"<parent>.*?</parent>", "", txt, flags=re.S)
+        m = re.search(r"<artifactId>(?:spark-)?([A-Za-z0-9\-]+?)(?:_[0-9.]+)?</artifactId>", txt)
+        if not m:
+            continue
+        mod = m.group(1)
+        if mod in KNOWN_MODULES and mod not in modules:
+            modules[mod] = d
+    return modules
+
+
+def module_for_path(root, modules, relpath):
+    """Longest module dir that is a prefix of relpath."""
+    best = None
+    for mod, d in modules.items():
+        try:
+            Path(relpath).relative_to(d.relative_to(root))
+        except ValueError:
+            continue
+        if best is None or len(str(d)) > len(str(modules[best])):
+            best = mod
+    return best
+
+
+def discover_scala_suites(modules, mod, stem, cap=10):
+    """Find *Suite/*Test classes in a module whose names start with stem."""
+    d = modules.get(mod)
+    if d is None:
+        return []
+    found = set()
+    for td in ("src/test/scala", "src/test/java"):
+        base = d / td
+        if not base.exists():
+            continue
+        for pat in (f"{stem}Suite", f"{stem}Tests", f"{stem}Test", f"{stem}*Suite"):
+            for f in base.rglob(pat + ".*"):
+                if f.suffix in (".scala", ".java"):
+                    found.add(f.stem)
+    return sorted(found)[:cap]
+
+
+def py_dotted(root, path):
+    # Git hands us relative paths, rglob hands us absolute ones.
+    p = Path(path)
+    if not p.is_absolute():
+        p = Path(root) / p
+    return ".".join(p.relative_to(root).with_suffix("").parts[1:])
+
+
+def discover_py_modules(root, relpath):
+    """Map a changed python file to test modules. A changed test module maps
+    to itself; a source file maps to test_<stem>.py anywhere under python/."""
+    p = Path(relpath)
+    if p.parts[0] != "python" or p.suffix != ".py" or "__pycache__" in p.parts:
+        return []
+    if p.name.startswith("test_"):
+        return [py_dotted(root, p)]
+    stem = p.stem
+    out = []
+    for f in sorted((Path(root) / "python").rglob(f"test_{stem}.py")):
+        if "__pycache__" not in f.parts:
+            out.append(py_dotted(root, f))
+    return out
+
+
+def base_ref(root, requested):
+    if requested:
+        return requested
+    for cand in ("upstream/master", "origin/master", "master"):
+        if subprocess.run(["git", "rev-parse", "--verify", "--quiet", cand],
+                          cwd=root, capture_output=True).returncode == 0:
+            return cand
+    die("no upstream/master, origin/master or master ref to diff against; use --base")
+
+
+def changed_files(root, base):
+    mb = subprocess.run(["git", "merge-base", "HEAD", base],
+                        cwd=root, capture_output=True, text=True)
+    if mb.returncode != 0:
+        die(f"git merge-base HEAD {base} failed: {mb.stderr.strip()}")
+    mb = mb.stdout.strip()
+    diff = subprocess.run(["git", "diff", "--name-only", mb],
+                          cwd=root, capture_output=True, text=True, check=True).stdout
+    untracked = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard"],
+        cwd=root, capture_output=True, text=True, check=True).stdout
+    files = sorted({*diff.splitlines(), *untracked.splitlines()} - {""})
+    return mb, files
+
+
+def py_item(root, tf, why):
+    """A py Item for a test_*.py path, with the gated-suite env attached
+    where needed."""
+    env = HYPOTHESIS_ENV if "hypothesis" in Path(tf).name else None
+    return Item("py", None, py_dotted(root, tf), why, env)
+
+
+def py_spec_item(spec, why):
+    """Same for an already-dotted unittest spec (which is not a path, so
+    py_item/py_dotted do not apply)."""
+    env = HYPOTHESIS_ENV if "hypothesis" in spec else None
+    return Item("py", None, spec, why, env)
+
+
+def plan_all(root, modules):
+    """Every test we know how to run: each SBT module's full test phase plus
+    every PySpark test module. Days. R and the docs build stay out -- they
+    need toolchains this script does not check, and CI covers them."""
+    items, notes = [], []
+    for mod, d in sorted(modules.items()):
+        if (d / "src" / "test").is_dir():
+            items.append(Item("scala", mod, "--all--", "all modules"))
+        else:
+            notes.append(f"module {mod} has no src/test; skipped")
+    for tf in sorted((Path(root) / "python" / "pyspark").rglob("test_*.py")):
+        if "__pycache__" not in tf.parts:
+            items.append(py_item(root, tf, "all pyspark"))
+    return items, notes
+
+
+def plan_from_diff(root, modules, files, run_all_modules):
+    items, notes = [], []
+    seen = {}
+
+    def add(item):
+        key = (item.kind, item.module, item.pattern)
+        if key in seen:
+            # An env-carrying item (gated suite) beats the bare one: the
+            # self-mapped test module and the transpile block reach the same
+            # suite, and only one of them sets RUN_HYPOTHESIS.
+            if item.env_extra and not seen[key].env_extra:
+                items[items.index(seen[key])] = item
+                seen[key] = item
+            return
+        seen[key] = item
+        items.append(item)
+
+    code = [f for f in files if not DOC_ONLY.search(f)]
+    if any(BUILD_FILES.search(f) for f in files):
+        notes.append("build files changed: the build step covers compilation; "
+                     "consider --modules if build logic itself changed")
+    transpile_touched = any("transpile" in f and f.startswith("python/") for f in code)
+
+    for f in code:
+        if f.endswith((".scala", ".java")):
+            mod = module_for_path(root, modules, f)
+            if mod is None:
+                notes.append(f"no SBT module found for {f}; skipped")
+                continue
+            if run_all_modules:
+                add(Item("scala", mod, "--all--", f))
+                continue
+            stem = Path(f).stem
+            is_test = "/src/test/" in f
+            if is_test and re.search(r"(Suite|Tests?|Benchmark)$", stem):
+                add(Item("scala", mod, f"*{stem}", f))
+            else:
+                suites = discover_scala_suites(modules, mod, stem)
+                if not suites:
+                    notes.append(f"no suites matching {stem}* in {mod} (from {f})")
+                for s in suites:
+                    add(Item("scala", mod, f"*{s}", f))
+                if not is_test:
+                    notes.append(f"{f} is not a test; running {len(suites)} name-matched suite(s)")
+        elif f.startswith("python/") and f.endswith(".py"):
+            if run_all_modules:
+                parts = Path(f).parts
+                # Touched package = python/pyspark/<pkg>; run every test under it.
+                pkg = Path(*parts[:3]) if len(parts) > 3 else Path("python/pyspark")
+                for tf in sorted((Path(root) / pkg).rglob("test_*.py")):
+                    if "__pycache__" not in tf.parts:
+                        add(py_item(root, tf, f))
+                continue
+            mods = discover_py_modules(root, f)
+            if not mods:
+                notes.append(f"no test_<stem> module found for {f}; skipped")
+            for m in mods:
+                add(Item("py", None, m, f))
+        else:
+            notes.append(f"not mapped to tests: {f}")
+
+    if transpile_touched:
+        for f in sorted((Path(root) / "python" / "pyspark" / "sql" / "tests").glob(
+                "test_udf_transpile*.py")):
+            add(py_item(root, f, "transpile"))
+    return items, notes
+
+
+def resolve_explicit(root, modules, spec):
+    """Turn a command-line spec into Items."""
+    if spec.startswith("py:"):
+        return [py_spec_item(spec[3:], "cli")]
+    if spec.startswith("pyspark."):
+        return [py_spec_item(spec, "cli")]
+    if "/" in spec:
+        mod, pat = spec.split("/", 1)
+        if mod not in modules:
+            die(f"unknown SBT module '{mod}' in spec '{spec}'")
+        return [Item("scala", mod, pat, "cli")]
+    if spec.startswith("test_"):
+        hits = [f for f in (Path(root) / "python").rglob(f"{spec}.py")
+                if "__pycache__" not in f.parts]
+        if not hits:
+            die(f"no python test module matching '{spec}'")
+        return [py_item(root, h, "cli") for h in sorted(hits)]
+    # Bare scala glob, e.g. '*RocksDBSuite*' or 'RocksDBSuite'.
+    stem_glob = spec if "*" in spec else f"{spec}*"
+    out = []
+    for mod, d in sorted(modules.items()):
+        for td in ("src/test/scala", "src/test/java"):
+            base = d / td
+            if not base.exists():
+                continue
+            for f in base.rglob(f"{stem_glob}.*"):
+                if f.suffix in (".scala", ".java") and \
+                        re.search(r"(Suite|Tests?)$", f.stem):
+                    out.append(Item("scala", mod, f"*{f.stem}", "cli"))
+    if not out:
+        die(f"no scala suites matching '{spec}' in any module")
+    # Same class name can exist in only one module in practice; dedupe.
+    uniq = {(i.module, i.pattern): i for i in out}
+    return list(uniq.values())
+
+
+# --- execution -------------------------------------------------------------
+
+class Runner:
+    def __init__(self, root, logdir, suite_timeout_min, heap):
+        self.root = root
+        self.logdir = logdir
+        self.timeout = suite_timeout_min * 60
+        self.env = os.environ.copy()
+        for k in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"):
+            # Empty string is not enough: the guard is keyId != null. Genuinely unset.
+            self.env.pop(k, None)
+        self.env.update({
+            "SPARK_HOME": root,
+            "SPARK_LOCAL_IP": "127.0.0.1",
+            "SPARK_LOCAL_HOSTNAME": "localhost",
+            "SPARK_TESTING": "1",
+        })
+        if heap:
+            self.env["HEAP_SIZE"] = heap
+        self.current_proc = None
+
+    def env_for(self, item, venv_py):
+        env = dict(self.env)
+        env.update(item.env_extra)
+        if item.kind == "py":
+            local_dirs = Path(self.root) / "target" / "local-dirs"
+            local_dirs.mkdir(parents=True, exist_ok=True)
+            env.update({
+                "PYTHONPATH": str(Path(self.root) / "python"),
+                "PYSPARK_PYTHON": venv_py,
+                "PYSPARK_DRIVER_PYTHON": venv_py,
+                # Keep RocksDB SST/changelog IO on the worktree disk, not the
+                # shared 50G /tmp loop device.
+                "SPARK_LOCAL_DIRS": str(local_dirs),
+            })
+        return env
+
+    def _acquire_fallback(self):
+        """Only used when the with-test-lock helper is missing: same protocol,
+        3 flock files, hold the fd for the life of the child."""
+        os.makedirs(LOCK_DIR, exist_ok=True)
+        while True:
+            for i in range(LOCK_SLOTS):
+                fd = os.open(f"{LOCK_DIR}/slot-{i}", os.O_RDWR | os.O_CREAT, 0o644)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    say(f"fallback lock: got slot {i}")
+                    return fd
+                except BlockingIOError:
+                    os.close(fd)
+            say("fallback lock: all slots busy, waiting")
+            time.sleep(5)
+
+    def run(self, cmd, logfile, env, timeout=None):
+        """Run cmd under the shared lock, stream output to stdout AND logfile
+        (never pipe through tail/grep: a hung job must look hung)."""
+        timeout = timeout or self.timeout
+        use_helper = os.path.exists(LOCK_HELPER)
+        full = [LOCK_HELPER, "--"] + cmd if use_helper else cmd
+        fd = None if use_helper else self._acquire_fallback()
+        say("+ " + " ".join(cmd) + f"   [log: {logfile}]")
+        finished = threading.Event()
+        timed_out = False
+        with open(logfile, "a") as lf:
+            lf.write(f"$ {' '.join(cmd)}\n")
+            p = subprocess.Popen(
+                full, cwd=self.root, env=env, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True, bufsize=1,
+                start_new_session=True)
+            self.current_proc = p
+
+            def watchdog():
+                nonlocal timed_out
+                if not finished.wait(timeout):
+                    timed_out = True
+                    try:
+                        os.killpg(p.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
+            t = threading.Thread(target=watchdog, daemon=True)
+            t.start()
+            try:
+                for line in p.stdout:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                    lf.write(line)
+                rc = p.wait()
+            finally:
+                finished.set()
+                self.current_proc = None
+                if fd is not None:
+                    os.close(fd)
+        if timed_out:
+            say(f"TIMEOUT after {timeout // 60}min: {' '.join(cmd)}")
+            return -signal.SIGKILL, True
+        return rc, False
+
+    def kill_current(self):
+        if self.current_proc is not None:
+            try:
+                os.killpg(self.current_proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+
+# --- failure parsing ---------------------------------------------------------
+
+def parse_scala_failures(logfile):
+    """Return (failed [(suite, test)], suite_level [fqcn], compile_failed)."""
+    failed, suite_level, compile_failed = [], [], False
+    current_suite = None
+    try:
+        with open(logfile, errors="replace") as f:
+            for line in f:
+                m = SUITE_HDR.match(line)
+                if m:
+                    current_suite = m.group(1)
+                m = TEST_FAIL.match(line)
+                if m and current_suite:
+                    failed.append((current_suite, m.group(1)))
+                if "ABORTED" in line and current_suite:
+                    suite_level.append(current_suite)
+                if COMPILE_FAIL.search(line):
+                    compile_failed = True
+                m = FAILED_SUITE_LINE.match(line)
+                if m:
+                    suite_level.append(m.group(1))
+    except OSError:
+        pass
+    return failed, sorted(set(suite_level)), compile_failed
+
+
+def parse_py_failures(logfile):
+    out = []
+    try:
+        with open(logfile, errors="replace") as f:
+            for line in f:
+                m = PY_FAIL.match(line)
+                if m:
+                    # unittest.loader._FailedTest means the module itself did
+                    # not import; there is no individual test to retry.
+                    if m.group(2) == "unittest.loader._FailedTest":
+                        continue
+                    modcls, test = m.group(2), m.group(1)
+                    # Python 3.11+ prints (module.Class.test); 3.9 prints
+                    # (module.Class). Normalize to (module.Class, test).
+                    if modcls.endswith("." + test):
+                        modcls = modcls[: -(len(test) + 1)]
+                    out.append((modcls, test))
+    except OSError:
+        pass
+    return out
+
+
+# --- environment checks ---------------------------------------------------------
+
+def env_checks(root, venv_py, need_py):
+    if not shutil.which("java"):
+        die("java not on PATH")
+    if need_py:
+        # A wrong-interpreter venv is the same lie as a stale jar. The shared
+        # venv broke once already when an OS update moved /usr/bin/python3
+        # (3.12 -> 3.9) under it; check, don't assume.
+        probe = subprocess.run([venv_py, "-c", "import py4j"],
+                               capture_output=True, text=True)
+        if probe.returncode != 0:
+            die(f"{venv_py} cannot import py4j -- the shared venv is broken "
+                f"(check .venv/bin/python3 symlink vs pyvenv.cfg version): "
+                f"{probe.stderr.strip().splitlines()[-1] if probe.stderr else '?'}")
+    if not os.path.exists(LOCK_HELPER):
+        say(f"WARNING: {LOCK_HELPER} missing; using built-in flock fallback")
+    # RocksDB JNI extracts librocksdbjni.so into java.io.tmpdir and execs it.
+    # For PySpark-launched JVMs that is /tmp (verified: TMPDIR does not move
+    # java.io.tmpdir), so a noexec /tmp is a hard fail, not a surprise later.
+    probe = Path("/tmp/.ctar-exec-check")
+    try:
+        probe.write_text("#!/bin/sh\nexit 0\n")
+        probe.chmod(0o700)
+        if subprocess.run([str(probe)], capture_output=True).returncode != 0:
+            die("/tmp exists but failed to exec a probe script")
+    except OSError as e:
+        die(f"/tmp is noexec or broken ({e}); RocksDB native loading will fail")
+    finally:
+        probe.unlink(missing_ok=True)
+    free_gb = shutil.disk_usage(root).free / (1 << 30)
+    if free_gb < 15:
+        say(f"WARNING: only {free_gb:.0f}G free on the worktree filesystem; "
+            "RocksDB suites write GBs of SSTs")
+    # State store suites open a lot of files; raise soft nofile toward hard.
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft < 8192:
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (min(hard, 65536), hard))
+        except (ValueError, OSError):
+            say(f"WARNING: nofile soft limit is {soft} and could not be raised")
+    ps = subprocess.run(["ps", "-ef"], capture_output=True, text=True).stdout
+    orphans = [l for l in ps.splitlines()
+               if ("run-tests" in l or "testOnly" in l) and str(os.getpid()) not in l
+               and "grep" not in l and "compile-test-and-retry" not in l]
+    if orphans:
+        say("WARNING: possible leftover test processes (they hold no lock but "
+            "confuse ps output):")
+        for l in orphans[:5]:
+            say(f"  {l.strip()}")
+    (Path(root) / "target" / "tmp").mkdir(parents=True, exist_ok=True)
+    say(f"env ok: java={subprocess.run(['java', '-version'], capture_output=True, text=True).stderr.splitlines()[0] if shutil.which('java') else '?'}")
+    say(f"env ok: python={venv_py}")
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        prog="spark-compile-test-and-retry",
+        description="Build + test a Spark branch before pushing. "
+                    "Resilient: collects all failures, then re-runs each failed "
+                    "test individually to separate flakes from real failures.")
+    ap.add_argument("specs", nargs="*",
+                    help="suites: '*RocksDBSuite*', sql/'*FooSuite*', "
+                         "pyspark.sql.tests.test_foo, py:test_foo, or bare test_foo")
+    speed = ap.add_mutually_exclusive_group()
+    speed.add_argument("--fast", action="store_true",
+                       help="only the suites derived from the diff, for when "
+                            "in a hurry; the default is ALL the tests (days)")
+    speed.add_argument("--modules", action="store_true",
+                       help="all suites in every module the diff touches "
+                            "(hours); the middle speed")
+    ap.add_argument("--skip-build", action="store_true",
+                    help="skip build/sbt -Phive package (only if the jar is current)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="print the plan and the exact commands, run nothing")
+    ap.add_argument("--retries", type=int, default=1,
+                    help="per-failed-test retries before calling it real (default 1)")
+    ap.add_argument("--suite-timeout", type=int, default=90, metavar="MIN",
+                    help="per-suite timeout in minutes (default 90; whole-module "
+                         "runs get 8h)")
+    ap.add_argument("--base", help="diff base ref (default: upstream/master, "
+                                   "then origin/master, then master)")
+    ap.add_argument("--heap", help="HEAP_SIZE for SBT test JVMs (build default 4g)")
+    args = ap.parse_args()
+
+    root = find_root()
+    venv_py = find_venv_python(root)
+    modules = scan_modules(root)
+    if not modules:
+        die("no modules found (no pom.xml files?) -- is this a full Spark checkout?")
+
+    branch = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                            cwd=root, capture_output=True, text=True).stdout.strip()
+    base = base_ref(root, args.base)
+    mb, files = changed_files(root, base)
+    if (len(files) > 500 and not args.specs and not args.base
+            and (args.fast or args.modules)):
+        die(f"{len(files)} changed files vs {base} -- the auto-detected base is "
+            "almost certainly wrong (release branch diffed against master?). "
+            "Re-run with --base <release-branch> or pass explicit suites.")
+
+    logdir = Path(root) / "target" / "compile-test-and-retry-logs" / NOW
+    logdir.mkdir(parents=True, exist_ok=True)
+
+    say(f"worktree: {root}  branch: {branch}")
+    say(f"base: {base} (merge-base {mb[:12]}), {len(files)} changed file(s)")
+    say(f"logs: {logdir}")
+
+    notes = []
+    if args.specs:
+        items = []
+        for spec in args.specs:
+            items.extend(resolve_explicit(root, modules, spec))
+    elif not files:
+        say("empty diff and no suites given: nothing to test. Done.")
+        return 0
+    else:
+        code = [f for f in files if not DOC_ONLY.search(f)]
+        if not code:
+            say("doc-only diff: nothing to test. Done.")
+            return 0
+        if args.fast:
+            items, notes = plan_from_diff(root, modules, files, False)
+        elif args.modules:
+            items, notes = plan_from_diff(root, modules, files, True)
+        else:
+            items, notes = plan_all(root, modules)
+
+    for n in notes:
+        say(f"note: {n}")
+    if not items:
+        say("no test suites resolved from the diff; nothing to run. Done.")
+        return 0
+
+    say(f"plan: {'skip ' if args.skip_build else ''}build + {len(items)} suite(s):")
+    for it in items:
+        extra = f"  env={it.env_extra}" if it.env_extra else ""
+        say(f"  - {it.name():60s} (from {it.why}){extra}")
+
+    if args.dry_run:
+        say("dry run, would execute:")
+        if not args.skip_build:
+            say("  + build/sbt -Phive package")
+        for it in items:
+            say(f"  + {' '.join(it.cmd(root, venv_py))}")
+        return 0
+
+    env_checks(root, venv_py, any(it.kind == "py" for it in items))
+    runner = Runner(root, logdir, args.suite_timeout, args.heap)
+
+    def on_signal(signum, frame):
+        say(f"got signal {signum}, killing current step and stopping")
+        runner.kill_current()
+        sys.exit(128 + signum)
+
+    signal.signal(signal.SIGINT, on_signal)
+    signal.signal(signal.SIGTERM, on_signal)
+
+    started = time.time()
+    build_ok = True
+    if not args.skip_build:
+        say("=== phase 1: build (build/sbt -Phive package) ===")
+        rc, _ = runner.run(["build/sbt", "-Phive", "package"],
+                           logdir / "build.log", runner.env, timeout=3 * 3600)
+        if rc != 0:
+            say(f"BUILD FAILED (rc={rc}); not running tests against a stale jar. "
+                f"See {logdir}/build.log")
+            return 2
+        say("build: OK")
+    else:
+        say("=== phase 1: build SKIPPED (--skip-build); jar had better be current ===")
+
+    say(f"=== phase 2: {len(items)} suite(s), full runs, keep going on failure ===")
+    suite_results = []  # (item, rc, timed_out, logfile)
+    for it in items:
+        logfile = logdir / (re.sub(r"[^\w.-]+", "_", it.name()) + ".log")
+        env = runner.env_for(it, venv_py)
+        # A whole module's test phase is hours, not minutes.
+        timeout = 8 * 3600 if it.pattern == "--all--" else None
+        rc, timed_out = runner.run(it.cmd(root, venv_py), logfile, env,
+                                   timeout=timeout)
+        if rc != 0 and not timed_out and it.kind == "scala":
+            _, _, compile_failed = parse_scala_failures(logfile)
+            if compile_failed:
+                say(f"{it.name()}: compile failed, not retrying this suite")
+                suite_results.append((it, rc, timed_out, logfile))
+                continue
+        if rc != 0 and not timed_out:
+            # SBT itself dies sometimes (ivy hiccup, OOM in the build JVM).
+            # One do-over for the whole suite before parsing failures.
+            say(f"{it.name()}: rc={rc}, checking whether it even reached the tests")
+            failed = (parse_scala_failures(logfile)[0] if it.kind == "scala"
+                      else parse_py_failures(logfile))
+            if not failed:
+                say(f"{it.name()}: no test failures parsed; retrying the whole suite once")
+                rc, timed_out = runner.run(it.cmd(root, venv_py), logfile, env,
+                                           timeout=timeout)
+        suite_results.append((it, rc, timed_out, logfile))
+
+    say("=== phase 3: re-run each failed test individually ===")
+    flakes, real, not_retried = [], [], []
+    for it, rc, timed_out, logfile in suite_results:
+        if rc == 0:
+            continue
+        if it.kind == "scala":
+            failed, suite_level, compile_failed = parse_scala_failures(logfile)
+            if compile_failed:
+                not_retried.append((it, "compile failed", logfile))
+                continue
+            retry_specs = [(f"*{s.split('.')[-1]}", t, f"{s}::{t}") for s, t in failed]
+            for s in suite_level:
+                if not any(s == fs for fs, _ in failed):
+                    retry_specs.append((f"*{s.split('.')[-1]}", None, s))
+        else:
+            failed = parse_py_failures(logfile)
+            retry_specs = [(None, f"{mc}.{t}", f"{mc}.{t}") for mc, t in failed]
+        if not retry_specs:
+            if timed_out:
+                not_retried.append((it, "timed out", logfile))
+            else:
+                not_retried.append((it, "failed with no parseable test names", logfile))
+            continue
+        env = runner.env_for(it, venv_py)
+        for suite_glob, test_name, label in retry_specs:
+            if it.kind == "scala":
+                cmd = ["build/sbt", "-Phive", f"{it.module}/testOnly {suite_glob}"]
+                if test_name is not None:
+                    safe = test_name.replace('"', '\\"')
+                    cmd = ["build/sbt", "-Phive",
+                           f'{it.module}/testOnly {suite_glob} -- -z "{safe}"']
+            else:
+                cmd = [venv_py, "-u", "-m", "unittest", test_name]
+            rlog = logdir / ("retry-" + re.sub(r"[^\w.-]+", "_", label)[:120] + ".log")
+            attempt, ok = 0, False
+            while attempt < args.retries and not ok:
+                attempt += 1
+                rrc, _ = runner.run(cmd, rlog, env)
+                ok = rrc == 0
+            if ok:
+                flakes.append((it, label, attempt))
+                say(f"FLAKE: {label} (passed on retry {attempt})")
+            else:
+                real.append((it, label, rlog))
+                say(f"REAL FAILURE: {label} (still failing after {args.retries} retr"
+                    f"{'y' if args.retries == 1 else 'ies'})")
+
+    say("=== summary ===")
+    elapsed = int(time.time() - started)
+    green = sum(1 for _, rc, _, _ in suite_results if rc == 0)
+    lines = [
+        f"worktree: {root}  branch: {branch}  base: {base}",
+        f"build: {'skipped' if args.skip_build else 'OK'}",
+        f"suites: {len(suite_results)} run, {green} green first try, "
+        f"{len(suite_results) - green} needed a second look",
+        f"flakes (failed, then passed on retry): {len(flakes)}",
+    ]
+    lines += [f"  FLAKE {it.name()} :: {label} (retry {n})" for it, label, n in flakes]
+    lines.append(f"real failures: {len(real)}")
+    lines += [f"  FAIL {it.name()} :: {label} [{lg}]" for it, label, lg in real]
+    if not_retried:
+        lines.append(f"not retried: {len(not_retried)}")
+        lines += [f"  ??? {it.name()} ({why}) [{lg}]" for it, why, lg in not_retried]
+    lines.append(f"logs: {logdir}")
+    lines.append(f"elapsed: {elapsed // 60}m{elapsed % 60:02d}s")
+    for l in lines:
+        say(l)
+    (logdir / "summary.txt").write_text("\n".join(lines) + "\n")
+
+    if real or not_retried:
+        say("RESULT: RED -- fix the real failures before pushing")
+        return 1
+    if flakes:
+        say("RESULT: GREEN with flakes -- pushable, but the flakes above are worth a look")
+        return 0
+    say("RESULT: GREEN")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
