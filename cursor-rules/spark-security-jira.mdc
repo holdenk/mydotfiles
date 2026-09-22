@@ -1,0 +1,42 @@
+---
+description: Security JIRAs -- no hole-describing tickets; innocuous titles maybe
+alwaysApply: true
+---
+
+# Security JIRAs
+
+Same rule as the security bullet in `spark-conventions.mdc`. Kept as its
+own file so it cannot get lost in the conventions list.
+
+**Do not file a SPARK JIRA that describes a security hole, and I drive those
+myself.** The repo `AGENTS.md` says to run `dev/create_spark_jira.py` for any
+non-trivial PR. Skip that here: a JIRA is public the moment it exists, so a
+ticket that names the vulnerability describes the hole before the fix ships.
+
+Default: do not create a ticket, do not open a PR, do not push a branch, do
+not post a comment. Prepare the fix on a local branch with an unremarkable
+subject, tell me what you found, and stop -- I decide the ticket, the timing,
+the disclosure, and who sees it.
+
+**Exception:** if the work can honestly ship under an innocuous title that
+does not describe the vulnerability -- e.g. "Improve XYZ", "Tighten foo
+validation" -- we might file that ticket. Still no security tag, still no
+hole in the body. When the title would leak, do not file.
+
+**Security PRs may have no JIRA and no GitHub issue at all.** That is
+normal, not a missing-paperwork bug: a public ticket describes the hole
+before the fix ships. Don't "helpfully" create one, don't ask where the
+ticket is, and don't reference one in the commits. Generally be indirect:
+ordinary component tags (`[CORE]`, `[SQL]`, `[MINOR]`), a subject about
+hardening/validation/correctness, no "security", "vulnerability", "exploit",
+or CVE anywhere in the title, body, or commit messages. The details live in
+the private channels below until the advisory is out.
+
+Coordination runs through the ASF security process, not the normal
+contributor path:
+
+- https://www.apache.org/security/ -- the ASF process
+- https://spark.apache.org/security.html -- Spark's advisories and reporting address
+- security@apache.org / private@spark.apache.org -- private report intake
+- `SECURITY.md` in the repo -- threat model, in/out of scope, known non-findings
+- https://spark.apache.org/docs/latest/security.html -- what Spark does and does not defend against

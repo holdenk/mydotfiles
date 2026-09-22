@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "./hooks/inject-global-rules.sh"
+      }
+    ],
+    "beforeReadFile": [
+      {
+        "command": "./hooks/block-secrets.sh",
+        "failClosed": true
+      }
+    ],
+    "beforeShellExecution": [
+      {
+        "command": "./hooks/block-rm-rf.sh",
+        "failClosed": true
+      }
+    ]
+  }
+}

@@ -1,0 +1,58 @@
+---
+description: After merging master, rebuild and test before push; follow-up work is a new commit
+alwaysApply: true
+---
+
+# Git, for this workspace
+
+## Before pushing a Spark branch: spark-presend
+
+Run `bash ~/bin/spark-presend` from the worktree root and wait for
+the result before any push to the fork. Static checks, lint, then
+`spark-compile-test-and-retry` for the tests -- ALL of them by default
+(days; background it), `--modules` or `--fast` only when told to hurry.
+Green (flakes noted) -> push. Red -> fix first, then re-run. Do not push on
+a red run. Details and flags are in `always-run-tests.mdc`.
+
+Same at task level: when you believe a Spark task is done and code changed,
+suggest a pre-flight run before declaring done -- except pure doc changes,
+which it no-ops on anyway.
+
+## Merging master into a branch: rebuild, test, then push
+
+Merging `master` (or `upstream/master`) into a feature branch is not done when
+the merge commit exists. Finish the job, in this order, without being asked:
+
+1. **Rebuild.** `bash ~/bin/with-test-lock -- build/sbt -Phive package`.
+   The existing jar predates the merge, so any test run before this exercises
+   the OLD JVM side and reports a green that means nothing. This is the step
+   that gets skipped; do not skip it. Drift is real.
+2. **Run the tests** for whatever the branch touches, plus anything the merge
+   plausibly disturbed -- Scala `testOnly` if Scala/Java moved, not just
+   Python. Same lock. Wait if all 3 slots are taken.
+   `bash ~/bin/spark-compile-test-and-retry --fast` does steps 1-2 in
+   one shot (a merge needs the diff-derived suites, not the full suite).
+3. **Green -> push** the branch to the fork.
+4. **Red -> fix the failures first, then push.** Do not push a branch with known
+   failures and do not report the merge as done with them outstanding. If a
+   failure is genuinely pre-existing on `master` or upstream flake, say so with
+   the evidence rather than assuming it.
+
+Push here means the feature branch on the personal fork, and applies when that
+branch is already pushed -- a merge that leaves the remote branch stale is the
+thing to avoid. Never push to upstream. No force-push or `--amend` on pushed
+commits.
+
+## Follow-up work on a pushed branch is a new commit. Don't offer otherwise.
+
+Once a commit is pushed, further changes -- review fixes, comment trims,
+anything -- go on top as their own commit. Do not amend, do not force-push, and
+**do not present amending as an option** to weigh against it. Nobody asks for a
+tidied-up commit history. Offering the choice invents a norm that isn't there
+and wastes a round trip on a decision that was never open.
+
+Multiple commits on a PR are normal and fine. Do not describe them as noise, do
+not claim a committer would prefer a squash, and do not volunteer to squash
+later.
+
+Ask before any external operation (push, PR, GitHub comment).

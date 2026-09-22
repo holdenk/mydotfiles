@@ -1,0 +1,42 @@
+---
+description: Spark security process, Closed vs Merged, keep PR scope tight
+alwaysApply: true
+---
+
+# Apache Spark conventions worth remembering
+
+- **Do not tag commits/PRs as security.** CVEs are assigned separately and
+  commit messages are never amended for them. Use the ordinary component tag,
+  e.g. `[PYTHON][MINOR]`, not a security label.
+- **Do not file a SPARK JIRA that describes a security hole, and I drive
+  those myself.** The repo's `AGENTS.md` tells you to create a ticket with
+  `dev/create_spark_jira.py` for any non-trivial PR. That does not apply
+  here: a JIRA is public the moment it exists, so a ticket that names the
+  vulnerability describes the hole before the fix ships. Default: do not
+  create a ticket, do not open a PR, do not push a branch, do not post a
+  comment. Prepare the fix on a local branch with an unremarkable subject,
+  tell me what you found, and stop -- I decide the ticket, the timing, the
+  disclosure, and who sees it.
+  **Exception:** if the work can honestly ship under an innocuous title that
+  does not describe the vulnerability -- e.g. "Improve XYZ", "Tighten foo
+  validation" -- we might file that ticket. Still no security tag, still no
+  hole in the body. When the title would leak, do not file. Coordination
+  runs through the ASF security process, not the normal contributor path:
+  - https://www.apache.org/security/ -- the ASF process
+  - https://spark.apache.org/security.html -- Spark's advisories and reporting address
+  - security@apache.org / private@spark.apache.org -- private report intake
+  - `SECURITY.md` in the repo -- threat model, in/out of scope, known non-findings
+  - https://spark.apache.org/docs/latest/security.html -- what Spark does and does not defend against
+- A merged Spark PR shows on GitHub as **Closed, not Merged**
+ (`dev/merge_spark_pr.py`, not the merge button). Use
+ `dev/pr_merge_status.py <pr>` -- never read Closed as rejected.
+- Keep PR scope to what was asked. Note adjacent problems; do not fix them in
+ the same PR unless told to.
+- **Backporting a new conf to a pre-4.2 branch: drop the binding policy.**
+ `ConfigBuilder.withBindingPolicy(...)` / `ConfigBindingPolicy` exist only on
+ 4.2+ (master, branch-4.x/4.3/4.2). When a conf added on master is backported
+ to branch-4.1/4.0/3.5, delete the `.withBindingPolicy(...)` call and the
+ `ConfigBindingPolicy` import -- they do not compile there. Rare, but it
+ happens (security backports sometimes add confs). Also retarget
+ `.version(...)` to the backport branch's next release (SPARK-52611).
+ `spark-presend` errors on both.

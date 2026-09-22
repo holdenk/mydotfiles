@@ -106,6 +106,16 @@ fi
 cp gitconfig ~/.gitconfig
 git config --global user.email "holden@pigscanfly.ca"
 git config --global user.name "Holden Karau"
+# Agent configs: home-level instructions and the cursor/claude rule trees
+# live in this repo and are symlinked into place. Fails loudly rather than
+# overwriting if one of these already exists as a real file/dir.
+ln -sfn ~/mydotfiles/AGENTS.md ~/AGENTS.md
+mkdir -p ~/.cursor ~/.claude
+ln -sfn ~/mydotfiles/cursor-rules ~/.cursor/rules
+ln -sfn ~/mydotfiles/cursor-hooks ~/.cursor/hooks
+ln -sfn ~/mydotfiles/cursor-hooks.json ~/.cursor/hooks.json
+ln -sfn ~/mydotfiles/claude/CLAUDE.md ~/.claude/CLAUDE.md
+ln -sfn ~/mydotfiles/claude/rules ~/.claude/rules
 set -ex
 # Set up conda/mamba
 export arch=$(uname -m)

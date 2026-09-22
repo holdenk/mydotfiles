@@ -1,0 +1,100 @@
+---
+description: How to run Spark tests in this workspace; Scala rebuild; shared venv; long builds
+alwaysApply: true
+---
+
+# Spark workspace mechanics
+
+Always wrap builds and tests in `bash ~/bin/with-test-lock -- ...`
+(3 slots under `/tmp/test-lock`; see `always-run-tests.mdc`). Do not skip
+the Scala rebuild: Python tests against a stale jar are a lie.
+
+Cursor Shell defaults to a 30s block. Spark builds and full test suites exceed
+that by a lot. Set `block_until_ms` high, or background the job (`0`) and read
+the output file. Budget: a full `build/sbt package` is tens of minutes; a
+PySpark suite is minutes; the gated hypothesis suite is ~12 min at 200 examples.
+
+**Piping to `tail`/`grep` hides all progress until the process exits** (block
+buffering), so a hung job is indistinguishable from a slow one. Either let
+output stream and Read it, or `tee` to a file and inspect that.
+
+Before starting a test run, check for hung orphans from earlier sessions
+(`ps -ef | grep run-tests`) -- they accumulate, hold no CPU, and are easy to
+mistake for your own run.
+
+## Shared Python venv -- installs are global
+
+Every Spark worktree's `.venv` was created as `/home/hkarau/spark/.venv`, so
+activating any of them puts that ONE venv on `PATH`. A `pip install` /
+`pip uninstall` in one worktree silently changes every other worktree. Check
+`python -c "import X; print(X.__file__)"` before concluding a package is
+missing, and say so before uninstalling anything.
+
+`pyspark` itself is deliberately NOT installed there -- tests run against the
+source tree, so an installed `pyspark` would shadow it.
+
+## Running PySpark tests (apache/spark worktrees)
+
+`python/run-tests` is the documented entry point, but in this workspace it
+**hangs with zero output** (blocked in a futex, worker pool dead, no children,
+0% CPU -- not memory, the box has ~123 GB). Drive `unittest` directly instead:
+
+    source .venv/bin/activate
+    unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+    export SPARK_HOME=$(pwd) SPARK_LOCAL_IP=127.0.0.1 SPARK_LOCAL_HOSTNAME=localhost
+    export SPARK_TESTING=1
+    export PYSPARK_PYTHON=$(which python) PYSPARK_DRIVER_PYTHON=$(which python)
+    export PYTHONPATH=$(pwd)/python
+    bash ~/bin/with-test-lock -- python -u -m unittest pyspark.sql.tests.<module>[.<Class>.<test>]
+
+(`py4j` comes from the venv's site-packages, so it does not need to be on
+`PYTHONPATH`. Do not add `python/lib/py4j-*-src.zip`: globs are not expanded in
+an assignment, so it would land in `PYTHONPATH` literally.)
+
+Three non-obvious requirements:
+
+1. **`unset` the AWS vars.** They are set in this workspace's shell. When
+   present, `SparkHadoopUtil.appendS3CredentialsFromEnvironment` calls
+   `InetAddress.getLocalHost()`, which fails because this host (`ws-uswest1-*`)
+   is not in `/etc/hosts` and only resolves to link-local IPv6. Symptom:
+   `UnknownHostException` then `[JAVA_GATEWAY_EXITED] Java gateway process
+   exited before sending its port number`. `SPARK_LOCAL_IP` /
+   `SPARK_LOCAL_HOSTNAME` do NOT help -- that call ignores them. Setting the
+   vars to the empty string does NOT help either: the guard is
+   `keyId != null && accessKey != null`, and `""` is non-null. They must be
+   genuinely unset. Durable per-worktree alternative: put the `unset` lines in
+   `conf/spark-env.sh` (gitignored, sourced by `bin/load-spark-env.sh` before
+   the JVM starts).
+
+2. **Run from the repo root, not from `python/`.** Some suites read
+   `python/test_support/...` relative to cwd; from inside `python/` that becomes
+   `python/python/test_support/...` and produces spurious `Input path does not
+   exist` errors that look like real failures.
+
+3. **PySpark tests need a Hive-enabled build first**:
+   `bash ~/bin/with-test-lock -- build/sbt -Phive package`.
+   A jar from last week is not this branch.
+
+## Running Scala tests (apache/spark worktrees)
+
+If you touched Scala/Java, run the matching suites. Python-only is not
+coverage for the JVM side. Prefer SBT; module names live in
+`project/SparkBuild.scala`.
+
+    bash ~/bin/with-test-lock -- build/sbt -Phive 'sql/testOnly *MySuite'
+    bash ~/bin/with-test-lock -- build/sbt -Phive 'sql/testOnly org.apache.spark.sql.MySuite'
+    bash ~/bin/with-test-lock -- build/sbt -Phive 'sql/testOnly *MySuite -- -z "test name"'
+
+When transpile code or `test_udf_transpile_*` is in play, run the hypothesis
+suite with `RUN_HYPOTHESIS=1`. It is gated: without that env var, 19 of 23
+tests skip and the run looks green in ~5s. That is not a green. Cap with
+`RUN_HYPOTHESIS_MAX_EXAMPLES=200` locally (default 1000 is slow). Do not run
+it concurrently with another full suite (exit 144).
+
+    RUN_HYPOTHESIS=1 RUN_HYPOTHESIS_MAX_EXAMPLES=200 \
+      bash ~/bin/with-test-lock -- \
+      python -u -m unittest pyspark.sql.tests.test_udf_transpile_hypothesis
+
+Local `mypy` reports ~11 pre-existing errors in `pyspark/pandas/*` and
+`pyspark/sql/pandas/types.py` from pandas-stubs version drift. Confirm any
+error is in a file you touched before treating it as yours.

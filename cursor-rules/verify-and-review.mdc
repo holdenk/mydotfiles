@@ -1,0 +1,44 @@
+---
+description: Verify claims with a script; cross-review a diff before calling the work done
+alwaysApply: true
+---
+
+# Verify, then review, then say done
+
+## Verify claims before asserting them
+
+When a claim is about language/runtime internals, library behavior, or "does X
+actually happen" -- write a throwaway script and check, then report the observed
+output. Do not reason it out and present the conclusion as fact. Applies
+especially to CPython internals (bytecode, code objects, closure capture,
+serialization), JVM behavior, and Arrow/pandas conversion.
+
+If a claim can't be cheaply verified, say so explicitly rather than stating it
+flatly.
+
+## Always run tests before saying it's done
+
+Code changes are not done until the tests for what you touched have actually
+run (see `always-run-tests.mdc`). A review of untested code is not a substitute.
+Rebuild Scala first; wrap the run in `with-test-lock`.
+
+## Cross-review before saying it's done
+
+Whenever a turn produced code changes, review the working diff BEFORE reporting
+the work as done. Independent perspectives, not re-reading your own reasoning --
+self-inspection reliably misses what a fresh reviewer catches. Use the
+`code-review` skill or Task subagents (separate reviewers, then merge findings).
+Use a max/thorough pass for anything non-trivial or subtle.
+
+Then act on it: fix real findings, and for anything deliberately not fixed, say
+which and why. Do not report the review as merely "run" or paste findings
+without resolving them.
+
+Two exceptions:
+
+- **The current task IS a review** -- do not recurse.
+- **No code changed** -- a question, an investigation, or a report has no diff
+  to review. Config/docs-only edits still get a read-through but do not need
+  the full multi-agent pass.
+
+Treat this as a standing request: it does not need to be asked for each time.
