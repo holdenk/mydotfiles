@@ -42,8 +42,11 @@ import sys
 import time
 from pathlib import Path
 
-LOCK_HELPER = os.path.expanduser("~/my-scripts/with-test-lock")
-TEST_RUNNER = os.path.expanduser("~/my-scripts/spark-compile-test-and-retry")
+# Siblings in the same dir as this script (resolves through the ~/bin
+# symlink to the mydotfiles checkout), so moving the repo never stales these.
+_HERE = Path(__file__).resolve().parent
+LOCK_HELPER = str(_HERE / "with-test-lock")
+TEST_RUNNER = str(_HERE / "spark-compile-test-and-retry")
 NOW = time.strftime("%Y%m%d-%H%M%S")
 
 # Conf builders used across Spark: SQLConf.buildConf, StaticSQLConf.buildStaticConf,

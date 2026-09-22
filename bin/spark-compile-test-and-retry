@@ -44,7 +44,9 @@ import threading
 import time
 from pathlib import Path
 
-LOCK_HELPER = os.path.expanduser("~/my-scripts/with-test-lock")
+# Sibling of this script (resolves through the ~/bin symlink), so moving
+# the mydotfiles checkout never stales this.
+LOCK_HELPER = str(Path(__file__).resolve().parent / "with-test-lock")
 LOCK_DIR = "/tmp/test-lock"
 LOCK_SLOTS = 3
 

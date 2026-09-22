@@ -22,7 +22,10 @@ set -ex
 
 REMOTE="${REMOTE:-upstream}"
 FORK_REMOTE="${FORK_REMOTE:-origin}"
-LOCK="${LOCK:-$HOME/my-scripts/with-test-lock}"
+# Sibling of this script (resolves through the ~/bin symlink), so moving the
+# mydotfiles checkout never stales this. LOCK env var overrides.
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+LOCK="${LOCK:-$SCRIPT_DIR/with-test-lock}"
 
 cd "$(git rev-parse --show-toplevel)"
 BRANCH="$(git branch --show-current)"
