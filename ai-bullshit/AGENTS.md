@@ -77,7 +77,9 @@ only when told to hurry. Exit non-zero = fix before pushing. Also suggest
 a run whenever a Spark task looks done and code changed; pure doc changes
 are exempt (it no-ops on doc-only diffs). `--dry-run` runs static checks
 only, `--skip-build` when the jar is current, `--base <ref>` for release
-branches.
+branches. Timing: the run that counts is the one AFTER your changes; a
+baseline run at the start to see what's already broken is fine but never
+substitutes.
 
 ## Co-author trailer on her own branches
 

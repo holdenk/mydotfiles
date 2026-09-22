@@ -114,6 +114,11 @@ thing. Logs and `summary.txt` land in
 `target/compile-test-and-retry-logs/<timestamp>/`. Exit 1 = real failures,
 fix before pushing. Exit 0 with flakes listed = pushable.
 
+Timing: the run that counts is the one AFTER your changes are in. A run at
+the start is fine as a baseline to see what's already broken (and makes
+later failures easier to attribute), but a baseline green says nothing
+about your changes -- the after-run is still required.
+
 Three speeds, same flags in both scripts: default is ALL the tests (every
 SBT module's test phase plus every PySpark test module -- days),
 `--modules` is every suite in touched modules (hours), `--fast` is

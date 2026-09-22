@@ -47,6 +47,11 @@ are not reported as the same thing. Logs and `summary.txt` land in
 fix before pushing. Exit 0 with flakes listed = pushable, but read the
 flakes.
 
+Timing: the run that counts is the one AFTER your changes are in. A run at
+the start is fine as a baseline to see what's already broken (and makes
+later failures easier to attribute), but a baseline green says nothing
+about your changes -- the after-run is still required.
+
 Three speeds: default is ALL the tests (every SBT module's test phase plus
 every PySpark test module -- days), `--modules` is every suite in every
 touched module (hours), `--fast` is just the diff-derived suites (only when
