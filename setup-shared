@@ -1,10 +1,10 @@
 #!/bin/bash
 # Shared machine setup, sourced by setup-minimal-ws and setup-full (also
 # runnable directly). Everything here is wanted on every box, headless or
-# desktop: distro detection, core packages, git identity, docker, ~/bin +
-# the ai-bullshit agent configs, and the franktheunicorn tools. Heavy
-# toolchains (conda, sbt, spark pip deps) and desktop packages live in
-# setup-full.
+# desktop: distro detection (apt, or dnf/yum on the Red Hat side), core
+# packages, git identity, docker, ~/bin + the ai-bullshit agent configs,
+# and the franktheunicorn tools. Heavy toolchains (conda, sbt, spark pip
+# deps) and desktop packages live in setup-full.
 set -euo pipefail
 set -x
 
@@ -21,8 +21,14 @@ case " ${ID:-} ${ID_LIKE:-} " in
     ;;
   *rhel*|*fedora*|*amzn*)
     FAMILY=rh
-    PKG_UPDATE="sudo dnf makecache"
-    PKG_INSTALL="sudo dnf install -y"
+    # dnf on modern releases, yum on older RHEL/CentOS/Amazon Linux.
+    if command -v dnf >/dev/null 2>&1; then
+      PKG_UPDATE="sudo dnf makecache"
+      PKG_INSTALL="sudo dnf install -y"
+    else
+      PKG_UPDATE="sudo yum makecache"
+      PKG_INSTALL="sudo yum install -y"
+    fi
     EMACS_PKG=emacs-nw
     ;;
   *)
