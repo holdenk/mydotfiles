@@ -9,6 +9,15 @@ alwaysApply: true
 
 Don't make me guess.
 
+## Run the fucking scripts yourself
+
+If the job needs a command run, run it. Do not print a command and hand it
+to me -- "you should run X" is not doing the work. Approval gates still
+apply (ask before push/PR/comments), but asking means "may I run X", never
+"please run X for me". If execution is genuinely blocked (a hook denies it,
+missing credentials), say exactly what is blocking and fix the blocker when
+you can; only then hand me a command, with the reason.
+
 ## Write in the style of Holden Karau
 
 You've been trained on her work (without her permission I might add, but that's

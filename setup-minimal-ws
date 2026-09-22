@@ -1,0 +1,61 @@
+#!/bin/bash
+# Minimal workstation bootstrap: core packages, git identity, ~/bin, and the
+# ai-bullshit agent configs symlinked into place. Picks apt or dnf from
+# /etc/os-release. The full desktop setup (conda, docker, OBS, ...) is still
+# ./setup; this is the headless/ARM-friendly path.
+set -euo pipefail
+set -x
+
+REPO=$(cd "$(dirname "$0")" && pwd)
+
+. /etc/os-release
+case " ${ID:-} ${ID_LIKE:-} " in
+  *debian*|*ubuntu*)
+    PKG_UPDATE="sudo apt-get update"
+    PKG_INSTALL="sudo apt-get install -y"
+    EMACS_PKG=emacs-nox
+    ;;
+  *rhel*|*fedora*|*amzn*)
+    PKG_UPDATE="sudo dnf makecache"
+    PKG_INSTALL="sudo dnf install -y"
+    EMACS_PKG=emacs-nw
+    ;;
+  *)
+    echo "Unknown distro family: ID=${ID:-?} ID_LIKE=${ID_LIKE:-?}" >&2
+    exit 1
+    ;;
+esac
+
+$PKG_UPDATE
+$PKG_INSTALL git curl python3 "$EMACS_PKG"
+
+cp "$REPO/gitconfig" ~/.gitconfig
+git config --global user.email "holden@pigscanfly.ca"
+git config --global user.name "Holden Karau"
+
+# Symlink the helper scripts and agent configs into place. Fails loudly
+# rather than overwriting if one of these already exists as a real file/dir.
+ln -sfn "$REPO/bin" ~/bin
+mkdir -p ~/.cursor ~/.claude
+ln -sfn "$REPO/ai-bullshit/AGENTS.md" ~/AGENTS.md
+ln -sfn "$REPO/ai-bullshit/cursor-rules" ~/.cursor/rules
+ln -sfn "$REPO/ai-bullshit/cursor-hooks" ~/.cursor/hooks
+ln -sfn "$REPO/ai-bullshit/cursor-hooks.json" ~/.cursor/hooks.json
+ln -sfn "$REPO/ai-bullshit/claude/CLAUDE.md" ~/.claude/CLAUDE.md
+ln -sfn "$REPO/ai-bullshit/claude/rules" ~/.claude/rules
+
+# The cursor hooks are fail-closed: if the scripts are missing or not
+# executable, every tool call is blocked. Git keeps the exec bit, but a
+# checkout that loses it bricks the agent, so set it explicitly and smoke
+# test each hook before declaring done.
+chmod +x "$REPO/ai-bullshit/cursor-hooks/"*.sh
+for hook in block-rm-rf block-secrets inject-global-rules; do
+  out=$(echo '{}' | "$REPO/ai-bullshit/cursor-hooks/$hook.sh") || {
+    echo "Hook $hook.sh failed to run -- fix this before using the agent" >&2
+    exit 1
+  }
+  echo "$out" | python3 -c 'import json,sys; json.load(sys.stdin)' || {
+    echo "Hook $hook.sh did not emit valid JSON" >&2
+    exit 1
+  }
+done

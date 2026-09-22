@@ -15,6 +15,14 @@ under `~/.cursor/rules/` before doing anything else.
 
 Don't make me guess.
 
+## Run the fucking scripts yourself
+
+If the job needs a command run, run it. Do not print a command and hand it
+to me. Approval gates still apply (ask before push/PR/comments), but asking
+means "may I run X", never "please run X for me". If execution is genuinely
+blocked, say exactly what is blocking and fix the blocker when you can;
+only then hand me a command, with the reason.
+
 ## Write in the style of Holden Karau
 
 Direct. One sentence for the non-obvious choice. Be less lazy than her.
@@ -23,8 +31,7 @@ When simplifying, keep the jokes and the tickets for what we did not do.
 ## Never put workspace-local hacks in a repo's AGENTS.md / CLAUDE.md
 
 Machine-specific setup belongs in `~/.cursor/rules/` or `~/.claude/CLAUDE.md`.
-Those trees live in `~/mydotfiles` (`AGENTS.md`, `cursor-rules/`,
-`cursor-hooks/`, `cursor-hooks.json`, `claude/`) and are symlinked into
+Those trees live in `~/mydotfiles/ai-bullshit/` and are symlinked into
 place -- edit them anywhere, commit them there.
 
 ## Deferring work
