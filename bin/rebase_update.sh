@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 # rebase_update.sh -- rebase the current Spark branch onto its PR's base
-# branch, re-add the co-author trailer, compile + test:compile (no tests
-# run, so no with-test-lock slot needed), force-push TO THE FORK.
-# spark-presend stays the real lint/test gate; this is the quick check
-# that the rebase didn't break the build, test sources included.
+# branch, re-add the co-author trailer, build-check, force-push TO THE FORK.
+#
+# Build-check modes:
+#   --compile-only (default)  compile + test:compile, no with-test-lock
+#                             slot needed.
+#   --full-test               lint-scala when Scala/Java moved, then
+#                             spark-compile-test-and-retry --fast --base
+#                             <base> (takes a lock slot, rebuilds, runs the
+#                             suites derived from the base diff with
+#                             per-test retries).
+# spark-presend stays the real lint/test gate; the default is the quick
+# check that the rebase didn't break the build, test sources included.
 #
 # Base branch resolution, first hit wins:
 #   1. explicit argument:        rebase_update.sh branch-3.5
@@ -18,7 +26,8 @@
 # because some local branches track upstream, and a bare force-push there
 # would rewrite apache/spark itself.
 #
-# --print-base resolves and prints the base branch, then exits.
+# --print-base resolves and prints the base branch, then exits. Flags and
+# the positional base argument can come in any order.
 
 set -ex
 
@@ -62,20 +71,35 @@ detect_base_from_name() {
   return 1
 }
 
-if [ "${1:-}" = "--print-base" ]; then
-  PRINT_ONLY=1; shift
-else
-  PRINT_ONLY=0
-fi
+PRINT_ONLY=0
+FULL_TEST=0
+BASE=""
+while [ $# -ge 1 ]; do
+  case "$1" in
+    --print-base)   PRINT_ONLY=1 ;;
+    --full-test)    FULL_TEST=1 ;;
+    --compile-only) FULL_TEST=0 ;;
+    --*)
+      echo "unknown flag: $1 (want --compile-only, --full-test, or --print-base)" >&2
+      exit 2 ;;
+    *)
+      if [ -n "$BASE" ]; then
+        echo "unexpected extra argument: $1" >&2
+        exit 2
+      fi
+      BASE="$1" ;;
+  esac
+  shift
+done
 
-if [ $# -ge 1 ]; then
-  BASE="$1"
-elif BASE=$(detect_base_from_pr); then
-  :
-elif BASE=$(detect_base_from_name); then
-  :
-else
-  BASE="master"
+if [ -z "$BASE" ]; then
+  if BASE=$(detect_base_from_pr); then
+    :
+  elif BASE=$(detect_base_from_name); then
+    :
+  else
+    BASE="master"
+  fi
 fi
 echo "Base branch: $BASE (branch: $BRANCH)"
 [ "$PRINT_ONLY" = "1" ] && exit 0
@@ -97,7 +121,23 @@ if [ ! -x "$COAUTHOR" ]; then
 fi
 "$COAUTHOR"
 
-./build/sbt -Phive compile test:compile || ./build/sbt -Phive clean compile test:compile
+if [ "$FULL_TEST" = "1" ]; then
+  # Siblings of this script (resolve through the ~/bin symlink), so moving
+  # the mydotfiles checkout never stales these. LOCK_HELPER env var overrides.
+  SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+  LOCK_HELPER="${LOCK_HELPER:-$SCRIPT_DIR/with-test-lock}"
+  if git diff --name-only "$BASE_REF" HEAD | grep -qE '\.(scala|java)$'; then
+    bash "$LOCK_HELPER" -- ./dev/lint-scala
+  else
+    echo "no Scala/Java changes vs $BASE_REF; skipping lint-scala"
+  fi
+  # Rebuilds and runs the suites derived from the $BASE_REF diff under the
+  # lock, retrying each failure individually. The full suite is
+  # spark-presend's job. It's a Python script: invoke directly, not via bash.
+  "$SCRIPT_DIR/spark-compile-test-and-retry" --fast --base "$BASE_REF"
+else
+  ./build/sbt -Phive compile test:compile || ./build/sbt -Phive clean compile test:compile
+fi
 
 git push --force-with-lease "$FORK_REMOTE" "HEAD:$BRANCH"
 echo "Ok all done! (rebased onto $BASE_REF, pushed to $FORK_REMOTE/$BRANCH)"
