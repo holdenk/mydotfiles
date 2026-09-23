@@ -33,8 +33,9 @@ home", nothing more.
 
 Helper scripts live in `~/mydotfiles/bin/` (the dotfiles repo; `~/bin` is a
 symlink to it and is on `PATH`): `with-test-lock`,
-`spark-compile-test-and-retry`, `spark-presend`, `rebase_update.sh`. They
-find each other by resolving their own path, so repo moves never stale the
+`spark-compile-test-and-retry`, `spark-presend`, `rebase_update.sh`
+(`rebase_update_batch.sh` runs that one over a list of branches). They find
+each other by resolving their own path, so repo moves never stale the
 cross-references. No AI in them -- all result parsing is static (regex over
 sbt/unittest output); if a parse gap shows up, fix the parser, do not shell
 out to an agent.
