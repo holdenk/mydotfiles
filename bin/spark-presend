@@ -47,6 +47,8 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 LOCK_HELPER = str(_HERE / "with-test-lock")
 TEST_RUNNER = str(_HERE / "spark-compile-test-and-retry")
+# One source of truth for the base branch -- see detect_base().
+BASE_HELPER = str(_HERE / "rebase_update.sh")
 NOW = time.strftime("%Y%m%d-%H%M%S")
 
 # Conf builders used across Spark: SQLConf.buildConf, StaticSQLConf.buildStaticConf,
@@ -107,30 +109,34 @@ def detect_base(root, requested):
     branch = git(root, "branch", "--show-current").stdout.strip()
     if not branch:
         die("detached HEAD and no --base given; check out a branch first")
-    try:
-        # No --author @me: it switches --head to prefix matching and a
-        # same-named backport branch (foo-4.x-r2) wins over the exact match.
-        gh = subprocess.run(
-            ["gh", "pr", "list", "--repo", "apache/spark", "--head", branch,
-             "--state", "open", "--json", "baseRefName,headRefName"],
-            capture_output=True, text=True, timeout=20)
-        if gh.returncode == 0 and gh.stdout.strip():
-            import json
-            for pr in json.loads(gh.stdout):
-                if pr["headRefName"] == branch:
-                    return pr["baseRefName"]
-    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError):
-        pass  # no gh / no network -- fall through to the branch-name heuristic
-    # Both an explicit "branch-N.M" and any bare N.M / N.x in the name are
-    # candidates; first one that exists as an upstream branch wins (so
-    # ivy2.5.3 doesn't resolve to 2.5, and foo-branch-9.9-4.0 finds 4.0).
-    candidates = re.findall(r"branch-[0-9]+\.[0-9x]+", branch) + [
-        "branch-" + v for v in re.findall(r"[0-9]+\.[0-9x]+", branch)]
-    for c in candidates:
-        if git(root, "rev-parse", "--verify", "--quiet",
-               f"refs/remotes/upstream/{c}", check=False).returncode == 0:
-            return c
-    return "master"
+    # Delegate to rebase_update.sh --print-base rather than keep a second copy
+    # of this. They MUST agree: whatever this resolves feeds the conf-version and
+    # backport checks and becomes --base for the test phase, while the rebase
+    # targets the other one. They had drifted -- the copy here matched any bare
+    # N.M anywhere in the name (my-fix-3.5-backport -> branch-3.5,
+    # spark-arrow2.4-fix -> branch-2.4) where the sibling anchors the version at
+    # the end, and it had neither the fork-owner filter nor the treat-a-failed-
+    # query-as-fatal rule, so an expired token silently compared a backport
+    # against master's version numbers and printed GREEN.
+    if not Path(BASE_HELPER).exists():
+        die(f"{BASE_HELPER} is missing, so the base cannot be resolved the same "
+            "way the rebase resolves it; pass --base explicitly")
+    rb = subprocess.run([BASE_HELPER, "--print-base"], cwd=root,
+                        capture_output=True, text=True)
+    if rb.returncode == 2:
+        # Its systematic code: auth, network, a remote it cannot read. Guessing
+        # master here is how a backport gets checked against the wrong branch.
+        say("could not resolve the base (rebase_update.sh --print-base exited 2):")
+        for line in rb.stderr.strip().splitlines()[-5:]:
+            say(f"  {line}")
+        die("pass --base explicitly")
+    out = rb.stdout.strip().splitlines()
+    if rb.returncode != 0 or not out or not out[-1].strip():
+        say(f"rebase_update.sh --print-base failed (rc={rb.returncode}):")
+        for line in rb.stderr.strip().splitlines()[-5:]:
+            say(f"  {line}")
+        die("pass --base explicitly")
+    return out[-1].strip()
 
 
 def base_version(root, base_ref):

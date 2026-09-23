@@ -182,8 +182,13 @@ if [ -z "$BASE" ]; then
     echo "if this branch targets a release branch, pass it: $0 branch-4.0" >&2
   fi
 fi
+if [ "$PRINT_ONLY" = "1" ]; then
+  # The base alone on stdout, so callers can use it. set -x trace goes to
+  # stderr, so this is the only thing on stdout.
+  printf '%s\n' "$BASE"
+  exit 0
+fi
 echo "Base branch: $BASE (branch: $BRANCH)"
-[ "$PRINT_ONLY" = "1" ] && exit 0
 
 if git rev-parse --verify --quiet "refs/remotes/$REMOTE/$BASE" >/dev/null; then
   BASE_REF="$REMOTE/$BASE"
