@@ -183,7 +183,7 @@ JDK_DEFAULT=$(find_jdk 21 || true)
 SPARK35_JDK=$(find_jdk 17 || true)
 
 if [ -n "$JDK_DEFAULT" ]; then
-  check_jdk_for_spark "$JDK_DEFAULT" "$JDK_DEFAULT"
+  check_jdk_for_spark "$JDK_DEFAULT" "default JAVA_HOME"
   export JAVA_HOME="$JDK_DEFAULT"
 else
   echo "no Java 21 JDK under $JVM_DIR; leaving JAVA_HOME=${JAVA_HOME:-unset} alone" >&2
@@ -211,23 +211,29 @@ if [ -n "$JDK_DEFAULT" ] || [ -n "$SPARK35_JDK" ]; then
     # awk, not `sed -i '/x/,+1d'`, which is GNU-only and we have Macs. The
     # separator blank in front goes too, or a re-run stacks another one.
     if grep -qF "mydotfiles: JAVA_HOME" "$rc" 2>/dev/null; then
-      awk '{ l[NR] = $0 }
-           END {
-             for (i = 1; i <= NR; i++) {
-               if (l[i] == "" && l[i+1] ~ /# mydotfiles: JAVA_HOME/) continue
-               if (l[i] ~ /# mydotfiles: JAVA_HOME/) {
-                 # Bounded on purpose. A block we wrote closes with the end
-                 # marker; one written before that marker existed is the
-                 # marker plus its single export line.
-                 end = 0
-                 for (j = i + 1; j <= NR; j++)
-                   if (l[j] ~ /# mydotfiles: end JAVA_HOME/) { end = j; break }
-                 i = end ? end : i + 1
-                 continue
-               }
-               print l[i]
-             }
-           }' "$rc" >"$rc.mydotfiles.tmp"
+      # Delete only lines we recognise as ours, never a range. No scan for the
+      # end marker: that has to look ahead, and a legacy block sitting above a
+      # well-formed one would latch onto the LATER block's end marker and take
+      # every user line between them. Anchored patterns, so a hand-written
+      # comment that merely mentions the marker is not mistaken for it.
+      # Invariant: every line the append below writes is matched by one of these.
+      awk '
+        function ours(s) {
+          return s ~ /^\[ -d "/ \
+              || s ~ /^# Nothing reads SPARK35_JAVA_HOME/ \
+              || s ~ /^# mydotfiles: end JAVA_HOME/
+        }
+        { l[NR] = $0 }
+        END {
+          for (i = 1; i <= NR; i++) {
+            if (l[i] == "" && l[i+1] ~ /^# mydotfiles: JAVA_HOME \(setup-shared\)/) continue
+            if (l[i] ~ /^# mydotfiles: JAVA_HOME \(setup-shared\)/) {
+              while (i + 1 <= NR && ours(l[i+1])) i++
+              continue
+            }
+            print l[i]
+          }
+        }' "$rc" >"$rc.mydotfiles.tmp"
       mv "$rc.mydotfiles.tmp" "$rc"
     fi
     {
