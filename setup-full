@@ -30,7 +30,7 @@ sudo apt-get install -y \
 sudo apt-fast update && sudo apt-get -y upgrade
 
 # Install packages from mypackages with graceful fallback
-echo "Checking package availability from mypackages..."
+echo "Checking package availability from $REPO/mypackages..."
 AVAILABLE_PACKAGES=""
 SKIPPED_PACKAGES=""
 
@@ -45,7 +45,7 @@ while IFS= read -r package; do
     echo "Warning: Package $package not found in repositories, skipping..."
     SKIPPED_PACKAGES="$SKIPPED_PACKAGES $package"
   fi
-done < mypackages
+done < "$REPO/mypackages"
 
 # Write skipped packages to a file
 if [ -n "$SKIPPED_PACKAGES" ]; then
@@ -75,7 +75,7 @@ if [ -z "${SERVER:-}" ]; then
        echo "Warning: Package $package not found in repositories, skipping..."
        SKIPPED_DESKTOP_PACKAGES="$SKIPPED_DESKTOP_PACKAGES $package"
      fi
-   done < mydesktoppackages
+   done < "$REPO/mydesktoppackages"
    
    # Write skipped desktop packages to a file
    if [ -n "$SKIPPED_DESKTOP_PACKAGES" ]; then

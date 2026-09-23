@@ -4,7 +4,8 @@
 # franktheunicorn add_coauthor.py filter. Installed into new clones by
 # init.templateDir (setup-shared sets it); older worktrees can opt in with
 #   git config core.hooksPath <dotfiles>/git-templates/hooks
-# Fail-open everywhere: a trailer hook should never block a commit.
+# Fail-open for our own work: a trailer hook should never block a commit. A
+# chained repo-local hook is the exception -- its rejection is propagated.
 
 msg_file=$1
 
@@ -14,7 +15,12 @@ msg_file=$1
 self=$(readlink -f "$0")
 local_hook="$(git rev-parse --git-common-dir)/hooks/commit-msg"
 if [ -x "$local_hook" ] && [ "$(readlink -f "$local_hook")" != "$self" ]; then
-  "$local_hook" "$@"
+  # Propagate its status. Fail-open is right for appending a trailer and wrong
+  # for a hook whose whole job is to reject a message -- git only aborts the
+  # commit if THIS hook does, so swallowing it turned every repo-local gate
+  # (Gerrit Change-Id, conventional-commits, DCO) into a no-op the moment
+  # core.hooksPath pointed here.
+  "$local_hook" "$@" || exit $?
 fi
 
 # Spark worktrees only -- the hook has no idea whose branch this is, it

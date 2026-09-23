@@ -101,7 +101,7 @@ for branch in "$@"; do
   fi
   held="$(git worktree list --porcelain \
             | awk -v b="refs/heads/$branch" '
-                /^worktree /  {wt=$2}
+                /^worktree /  {wt=substr($0, 10)}   # not $2: paths have spaces
                 /^branch /    {if ($2==b) print wt}')"
   if [ -n "$held" ] && [ "$held" != "$TOPLEVEL" ]; then
     PROBLEMS+=("$branch: checked out in $held")

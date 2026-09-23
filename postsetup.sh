@@ -56,8 +56,21 @@ sudo apt-get install -y sbt
 wget https://dl.google.com/go/go1.13.1.linux-amd64.tar.gz
 sudo tar -C /usr/local -xvf go1.13.1.linux-amd64.tar.gz
 
+# sshd reads ~/.ssh/authorized_keys; ~/authorized_keys is ignored, so this used
+# to report success and leave the box with no key access. -fsSL or an error page
+# gets appended as if it were a key, and append only what is missing so re-runs
+# do not stack duplicates. ($RUN_DEST_CMD was never assigned anywhere.)
 GH_USER=${GH_USER:-holdenk}
-curl https://github.com/${GH_USER}.keys | ${RUN_DEST_CMD} tee -a ~/authorized_keys
+mkdir -p ~/.ssh && chmod 700 ~/.ssh
+touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys
+if gh_keys=$(curl -fsSL "https://github.com/${GH_USER}.keys"); then
+  while read -r k; do
+    [ -n "$k" ] || continue
+    grep -qxF "$k" ~/.ssh/authorized_keys || printf '%s\n' "$k" >> ~/.ssh/authorized_keys
+  done <<<"$gh_keys"
+else
+  echo "could not fetch https://github.com/${GH_USER}.keys; no keys installed" >&2
+fi
 
 
 sudo npm i -g @github/copilot-language-server
