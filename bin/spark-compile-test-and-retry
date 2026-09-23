@@ -603,7 +603,11 @@ def resolve_jdk():
     hours into a run.
     """
     home = os.environ.get("JAVA_HOME") or ""
-    if not home or not (Path(home) / "bin" / "java").exists():
+    # X_OK, not exists(): build/sbt-launch-lib.bash:22 is `test -x
+    # "$JAVA_HOME/bin/java"` and silently falls back to PATH's java otherwise,
+    # so a non-executable bin/java here would leave sbt on the nix JDK while
+    # this script reported the other one.
+    if not home or not os.access(Path(home) / "bin" / "java", os.X_OK):
         found = shutil.which("java")
         if not found:
             die("no usable JAVA_HOME and no java on PATH")
