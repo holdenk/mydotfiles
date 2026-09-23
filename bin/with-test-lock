@@ -4,7 +4,7 @@
 set -euo pipefail
 
 LOCK_DIR=/tmp/test-lock
-SLOTS=3
+SLOTS=5
 POLL_SECS=5
 
 usage() {

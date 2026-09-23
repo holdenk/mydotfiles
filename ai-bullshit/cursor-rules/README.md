@@ -11,7 +11,7 @@ worktrees those files are tracked upstream.
 |---|---|
 | `style.mdc` | always -- voice, done-ness, where hacks belong |
 | `defer-items.mdc` | always -- defer requests write `~/defered_items/projects/<date>_<desc>.md` |
-| `always-run-tests.mdc` | always -- run tests, `/tmp/test-lock` (3 slots), Scala rebuild |
+| `always-run-tests.mdc` | always -- run tests, `/tmp/test-lock` (5 slots), Scala rebuild |
 | `verify-and-review.mdc` | always -- claims, tests, cross-review |
 | `git-workflow.mdc` | always -- merge/rebuild/test/push, no amend after push |
 | `spark-pyspark.mdc` | Spark worktrees -- venv, Scala + Python how to run tests |

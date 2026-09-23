@@ -48,7 +48,7 @@ from pathlib import Path
 # the mydotfiles checkout never stales this.
 LOCK_HELPER = str(Path(__file__).resolve().parent / "with-test-lock")
 LOCK_DIR = "/tmp/test-lock"
-LOCK_SLOTS = 3
+LOCK_SLOTS = 5
 
 DOC_ONLY = re.compile(
     r"(^docs/|^\.github/|^dev/|^LICENSE|^NOTICE|\.md$|\.rst$|\.markdown$)")
@@ -411,7 +411,7 @@ class Runner:
 
     def _acquire_fallback(self):
         """Only used when the with-test-lock helper is missing: same protocol,
-        3 flock files, hold the fd for the life of the child."""
+        5 flock files, hold the fd for the life of the child."""
         os.makedirs(LOCK_DIR, exist_ok=True)
         while True:
             for i in range(LOCK_SLOTS):

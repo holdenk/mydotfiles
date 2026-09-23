@@ -75,9 +75,9 @@ Do not ask first. The repo `AGENTS.md` says to ask before running tests on
 your own; this workspace overrides that. Code changed -> tests run -> then
 you may say done. A green you did not produce is not a green.
 
-### Shared lock: 3 slots under `/tmp/test-lock`
+### Shared lock: 5 slots under `/tmp/test-lock`
 
-This box is shared. Builds and tests take a slot. At most ~3 concurrent
+This box is shared. Builds and tests take a slot. At most ~5 concurrent
 holders; otherwise wait until a slot drops. Release when the command exits
 (including failure). `flock`, not mkdir -- a dead process drops the lock.
 
@@ -88,8 +88,8 @@ Do not acquire in one shell and run in another; the wrapper is the holder.
 Backgrounding is fine if the wrapper is the parent (`run_in_background`
 around the wrapper).
 
-If the helper is missing, the protocol is three flock files
-`/tmp/test-lock/slot-{0,1,2}` -- non-blocking acquire, else wait, then run,
+If the helper is missing, the protocol is five flock files
+`/tmp/test-lock/slot-{0,1,2,3,4}` -- non-blocking acquire, else wait, then run,
 then drop the fd.
 
 ### Scala builds. Drift is real.
@@ -184,7 +184,7 @@ asked:
    is the step that gets skipped; do not skip it. Drift is real.
 2. **Run the tests** for whatever the branch touches, plus anything the
    merge plausibly disturbed -- Scala `testOnly` if Scala/Java moved, not
-   just Python. Same lock. Wait if all 3 slots are taken.
+   just Python. Same lock. Wait if all 5 slots are taken.
    `bash ~/bin/spark-compile-test-and-retry --fast` does steps 1-2 in
    one shot (a merge needs the diff-derived suites, not the full suite).
 3. **Green -> push** the branch to the fork.

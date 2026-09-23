@@ -59,7 +59,7 @@ resuming. Then tell me the path.
 ## Always fucking run tests
 
 Do not ask first. Wrap builds and tests in
-`bash ~/bin/with-test-lock -- ...` (3 slots under `/tmp/test-lock`;
+`bash ~/bin/with-test-lock -- ...` (5 slots under `/tmp/test-lock`;
 wait if they are all taken; release when done). Rebuild Scala
 (`build/sbt -Phive package`) before Python tests -- drift is real. If you
 touched Scala/Java, run the matching `testOnly` suites, not just Python.

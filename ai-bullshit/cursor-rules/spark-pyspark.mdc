@@ -6,7 +6,7 @@ alwaysApply: true
 # Spark workspace mechanics
 
 Always wrap builds and tests in `bash ~/bin/with-test-lock -- ...`
-(3 slots under `/tmp/test-lock`; see `always-run-tests.mdc`). Do not skip
+(5 slots under `/tmp/test-lock`; see `always-run-tests.mdc`). Do not skip
 the Scala rebuild: Python tests against a stale jar are a lie.
 
 Cursor Shell defaults to a 30s block. Spark builds and full test suites exceed
