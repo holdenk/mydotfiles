@@ -161,36 +161,22 @@ else
   [ -n "${JAVA_HOME:-}" ] && check_jdk_for_spark "$JAVA_HOME" "inherited JAVA_HOME"
 fi
 
-# RocksDB/LevelDB JNI: the box's default `java` (nix-provided on the shared
-# ws boxes, see /etc/profile.d/java.sh) uses nix's own glibc dynamic linker,
-# which never consults the system ld.so.cache. So even though libstdc++.so.6
-# is right there in /lib64, a native lib extracted from a jar (rocksdbjni,
-# leveldbjni) fails to dlopen it -- UnsatisfiedLinkError, looks like a missing
-# package but isn't. Fix: put its actual directory on LD_LIBRARY_PATH so any
-# JDK's linker finds it, nix or system. Looked up via ldconfig rather than
-# hardcoded, since debian puts it in a triplet dir, not /lib64.
-STDCXX_LIB=$(ldconfig -p 2>/dev/null | awk '/libstdc\+\+\.so\.6/ {print $NF; exit}')
-if [ -n "$STDCXX_LIB" ]; then
-  STDCXX_DIR=$(dirname "$STDCXX_LIB")
-  export LD_LIBRARY_PATH="$STDCXX_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-  for shellrc in bashrc zshrc; do
-    rc="$HOME/.$shellrc"
-    [ -e "$rc" ] || command -v "${shellrc%rc}" >/dev/null 2>&1 || continue
-    # Match the marker as written below: "(libstdc++)" never appears -- the
-    # comment says "(libstdc++, setup-shared)" -- so the paren'd form guarded
-    # nothing and every setup run appended another copy.
-    if ! grep -qF "mydotfiles: LD_LIBRARY_PATH" "$rc" 2>/dev/null; then
-      cat >>"$rc" <<EOF
-
-# mydotfiles: LD_LIBRARY_PATH (libstdc++, setup-shared). Nix JDKs don't see
-# /etc/ld.so.cache -- RocksDB/LevelDB JNI extraction needs this to dlopen.
-[ -d "$STDCXX_DIR" ] && export LD_LIBRARY_PATH="$STDCXX_DIR\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
-EOF
-    fi
-  done
-else
-  echo "ldconfig has no libstdc++.so.6 even after installing $LIBSTDCXX_PKG; RocksDB/LevelDB JNI tests will fail" >&2
-fi
+# RocksDB/LevelDB JNI needs libstdc++, and a nix JDK cannot find it: nix's
+# glibc loader never reads /etc/ld.so.cache, so libstdc++.so.6 sits in /lib64
+# and a native lib extracted from a jar (rocksdbjni, leveldbjni) still fails to
+# dlopen it. Reads like a missing package and isn't. A system JDK has no such
+# problem, which is what JAVA_HOME above points at -- so warn rather than
+# "fix" it here. Do NOT export LD_LIBRARY_PATH=/lib64 to paper over it: that
+# applies to every process, and nix binaries built against a newer glibc then
+# resolve libc.so.6 from /lib64 and die ("version `GLIBC_2.38' not found").
+case "$(readlink -f "${JAVA_HOME:-}/bin/java" 2>/dev/null)" in
+  /nix/store/*)
+    echo "WARNING: JAVA_HOME=$JAVA_HOME is nix-provided. Its loader ignores" >&2
+    echo "  /etc/ld.so.cache, so RocksDB/LevelDB JNI cannot dlopen libstdc++" >&2
+    echo "  and those suites fail with UnsatisfiedLinkError. Point JAVA_HOME at" >&2
+    echo "  a system JDK (/usr/lib/jvm/*) before building or testing Spark." >&2
+    ;;
+esac
 
 # franktheunicorn tools: clone and symlink everything in tools/ into ~/bin.
 # ~/bin is a symlink into this repo, so the tool names are listed in
