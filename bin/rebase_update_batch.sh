@@ -99,10 +99,17 @@ for branch in "$@"; do
     PROBLEMS+=("$branch: no such branch locally or on $FORK_REMOTE")
     continue
   fi
+  # Skip prunable records: a worktree whose gitdir points at a directory that
+  # no longer exists does not actually hold the branch, but it is still listed,
+  # so it refused the branch outright. `git worktree prune` would clear these,
+  # but do not mutate the repo just to validate it -- ignore them instead.
   held="$(git worktree list --porcelain \
             | awk -v b="refs/heads/$branch" '
-                /^worktree /  {wt=substr($0, 10)}   # not $2: paths have spaces
-                /^branch /    {if ($2==b) print wt}')"
+                /^worktree /  {wt=substr($0, 10); br=""; prunable=0}  # not $2: paths have spaces
+                /^branch /    {br=$2}
+                /^prunable/   {prunable=1}
+                /^$/          {if (br==b && !prunable) print wt; wt=""; br=""; prunable=0}
+                END           {if (br==b && !prunable) print wt}')"
   if [ -n "$held" ] && [ "$held" != "$TOPLEVEL" ]; then
     PROBLEMS+=("$branch: checked out in $held")
   fi
@@ -151,10 +158,17 @@ for branch in "$@"; do
     continue
   fi
   # --ff-only: a diverged local branch is a human problem, not something to
-  # merge-commit over in a batch run.
-  if ! git pull --ff-only "$FORK_REMOTE" "$branch"; then
-    FAILED+=("$branch (pull --ff-only $FORK_REMOTE)")
-    continue
+  # merge-commit over in a batch run. Skipped when the branch is not on the fork
+  # yet: there is nothing to fast-forward to, and pulling a nonexistent ref can
+  # only fail -- which made a branch's first push through the batch impossible
+  # even though rebase_update.sh handles that case fine.
+  if [ -n "$(git ls-remote --heads "$FORK_REMOTE" "refs/heads/$branch" 2>/dev/null)" ]; then
+    if ! git pull --ff-only "$FORK_REMOTE" "$branch"; then
+      FAILED+=("$branch (pull --ff-only $FORK_REMOTE)")
+      continue
+    fi
+  else
+    echo "$branch is not on $FORK_REMOTE yet; skipping the pull"
   fi
   # Roll back to here on failure: past the rebase the work is rewritten, not
   # merely in progress, and `rebase --abort` has nothing left to undo.

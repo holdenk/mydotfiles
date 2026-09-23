@@ -329,7 +329,13 @@ def plan_from_diff(root, modules, files, run_all_modules):
             if not mods:
                 notes.append(f"no test_<stem> module found for {f}; skipped")
             for m in mods:
-                add(Item("py", None, m, f))
+                # py_spec_item, not a bare Item: m is already dotted, and this
+                # was the one py construction site that skipped the helper, so
+                # it never attached the gate env. A hypothesis-named module whose
+                # path lacks "transpile" would run with 19 of 23 tests skipped
+                # and look green in 5s. add()'s "env-carrying item wins" merge
+                # only papers over that while exactly one such suite exists.
+                add(py_spec_item(m, f))
         else:
             notes.append(f"not mapped to tests: {f}")
 
