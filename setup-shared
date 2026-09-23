@@ -18,6 +18,7 @@ case " ${ID:-} ${ID_LIKE:-} " in
     PKG_UPDATE="sudo apt-get update"
     PKG_INSTALL="sudo apt-get install -y"
     EMACS_PKG=emacs-nox
+    LIBSTDCXX_PKG=libstdc++6
     ;;
   *rhel*|*fedora*|*amzn*)
     FAMILY=rh
@@ -30,6 +31,7 @@ case " ${ID:-} ${ID_LIKE:-} " in
       PKG_INSTALL="sudo yum install -y"
     fi
     EMACS_PKG=emacs-nw
+    LIBSTDCXX_PKG=libstdc++
     ;;
   *)
     echo "Unknown distro family: ID=${ID:-?} ID_LIKE=${ID_LIKE:-?}" >&2
@@ -38,7 +40,7 @@ case " ${ID:-} ${ID_LIKE:-} " in
 esac
 
 $PKG_UPDATE
-$PKG_INSTALL git curl python3 "$EMACS_PKG"
+$PKG_INSTALL git curl python3 "$EMACS_PKG" "$LIBSTDCXX_PKG"
 
 cp "$REPO/gitconfig" ~/.gitconfig
 git config --global user.email "holden@pigscanfly.ca"
@@ -157,6 +159,37 @@ else
   echo "no $JDK_DEFAULT; leaving JAVA_HOME=${JAVA_HOME:-unset} alone" >&2
   # Nothing of ours to set, so vet whatever the box already points at.
   [ -n "${JAVA_HOME:-}" ] && check_jdk_for_spark "$JAVA_HOME" "inherited JAVA_HOME"
+fi
+
+# RocksDB/LevelDB JNI: the box's default `java` (nix-provided on the shared
+# ws boxes, see /etc/profile.d/java.sh) uses nix's own glibc dynamic linker,
+# which never consults the system ld.so.cache. So even though libstdc++.so.6
+# is right there in /lib64, a native lib extracted from a jar (rocksdbjni,
+# leveldbjni) fails to dlopen it -- UnsatisfiedLinkError, looks like a missing
+# package but isn't. Fix: put its actual directory on LD_LIBRARY_PATH so any
+# JDK's linker finds it, nix or system. Looked up via ldconfig rather than
+# hardcoded, since debian puts it in a triplet dir, not /lib64.
+STDCXX_LIB=$(ldconfig -p 2>/dev/null | awk '/libstdc\+\+\.so\.6/ {print $NF; exit}')
+if [ -n "$STDCXX_LIB" ]; then
+  STDCXX_DIR=$(dirname "$STDCXX_LIB")
+  export LD_LIBRARY_PATH="$STDCXX_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  for shellrc in bashrc zshrc; do
+    rc="$HOME/.$shellrc"
+    [ -e "$rc" ] || command -v "${shellrc%rc}" >/dev/null 2>&1 || continue
+    # Match the marker as written below: "(libstdc++)" never appears -- the
+    # comment says "(libstdc++, setup-shared)" -- so the paren'd form guarded
+    # nothing and every setup run appended another copy.
+    if ! grep -qF "mydotfiles: LD_LIBRARY_PATH" "$rc" 2>/dev/null; then
+      cat >>"$rc" <<EOF
+
+# mydotfiles: LD_LIBRARY_PATH (libstdc++, setup-shared). Nix JDKs don't see
+# /etc/ld.so.cache -- RocksDB/LevelDB JNI extraction needs this to dlopen.
+[ -d "$STDCXX_DIR" ] && export LD_LIBRARY_PATH="$STDCXX_DIR\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+EOF
+    fi
+  done
+else
+  echo "ldconfig has no libstdc++.so.6 even after installing $LIBSTDCXX_PKG; RocksDB/LevelDB JNI tests will fail" >&2
 fi
 
 # franktheunicorn tools: clone and symlink everything in tools/ into ~/bin.
