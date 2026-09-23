@@ -87,7 +87,57 @@ ln -sfn "$REPO/ai-bullshit/claude/rules" ~/.claude/rules
 # so `java -version` and $JAVA_HOME can disagree (which is why the agent note
 # says to check both).
 JDK_DEFAULT=/usr/lib/jvm/temurin-25-jdk
+JDK_BUG_URL=https://bugs.openjdk.org/browse/JDK-8377811
+
+jdk_version() {
+  # The java.version property, so we get 25.0.3 and not a whole banner line.
+  [ -x "$1/bin/java" ] || return 1
+  "$1/bin/java" -XshowSettings:properties -version 2>&1 \
+    | awk -F'= ' '/^ *java\.version =/{print $2; exit}'
+}
+
+check_jdk_for_spark() {
+  local home="$1" how="$2" ver feature update
+  ver=$(jdk_version "$home") || return 0
+  [ -n "$ver" ] || return 0
+  feature=${ver%%.*}
+  case "$feature" in
+    (""|*[^0-9]*) return 0 ;;   # 25-ea and friends: not ours to judge
+  esac
+  # -s matters: without it, `cut -d. -f3` on a dotless "25" returns "25", and a
+  # bare Java 25 sails through the check below.
+  update=$(printf '%s' "$ver" | cut -s -d. -f3)
+  update=${update%%[^0-9]*}     # 1-beta -> 1, and empty for "25" or "25.0"
+  update=${update:-0}
+  # Java 25 below 25.0.3 hits JDK-8377811 (G1GC evacuates pinned objects).
+  # Upstream banned it in SPARK-56843, so a build on one fails anyway -- fail
+  # here, where the message can say why, instead of in every later build.
+  # "update" is the third version component, matching Runtime.Version.update()
+  # and therefore SparkBuild.scala's comparison exactly. A hypothetical 25.1.0
+  # has update 0 and so is refused here too -- same as upstream would.
+  if [ "$feature" = 25 ] && [ "$update" -lt 3 ]; then
+    echo "already bad JDK version found for Spark development:" >&2
+    echo "  Java $ver at $home ($how)" >&2
+    echo "  Java 25 needs 25.0.3 or later. On 25.0.0-25.0.2 G1 can move pinned" >&2
+    echo "  objects, which crashes JNI code (RocksDB, Arrow) at runtime." >&2
+    echo "  $JDK_BUG_URL (banned upstream by SPARK-56843)" >&2
+    echo "Other JDKs on this host, if any:" >&2
+    # Unmatched globs stay literal, hence the -e guard.
+    for d in /usr/lib/jvm/* ~/.sdkman/candidates/java/* /nix/store/*/bin/java; do
+      if [ -e "$d" ]; then echo "  $d" >&2; fi
+    done
+    echo "Upgrade that JDK or point JAVA_HOME at a supported one, then re-run." >&2
+    exit 1
+  fi
+  # 17.0.11 is java.minimum.version in Spark master's pom.xml. A warning only:
+  # this box is not necessarily for Spark.
+  if [ "$feature" -lt 17 ] || { [ "$feature" = 17 ] && [ "$update" -lt 11 ]; }; then
+    echo "WARNING: Java $ver at $home ($how) is below Spark's 17.0.11 minimum" >&2
+  fi
+}
+
 if [ -d "$JDK_DEFAULT" ]; then
+  check_jdk_for_spark "$JDK_DEFAULT" "$JDK_DEFAULT"
   export JAVA_HOME="$JDK_DEFAULT"
   # Append to an rc that exists, or to one whose shell is installed. Guarded by
   # a marker so re-running setup does not stack duplicates (the conda lines in
@@ -105,6 +155,8 @@ EOF
   done
 else
   echo "no $JDK_DEFAULT; leaving JAVA_HOME=${JAVA_HOME:-unset} alone" >&2
+  # Nothing of ours to set, so vet whatever the box already points at.
+  [ -n "${JAVA_HOME:-}" ] && check_jdk_for_spark "$JAVA_HOME" "inherited JAVA_HOME"
 fi
 
 # franktheunicorn tools: clone and symlink everything in tools/ into ~/bin.
