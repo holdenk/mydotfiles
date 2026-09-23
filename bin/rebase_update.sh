@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # rebase_update.sh -- rebase the current Spark branch onto its PR's base
-# branch, re-add the co-author trailer, lint (when Scala/Java moved),
-# compile, force-push TO THE FORK.
+# branch, re-add the co-author trailer, compile + test:compile (no tests
+# run, so no with-test-lock slot needed), force-push TO THE FORK.
+# spark-presend stays the real lint/test gate; this is the quick check
+# that the rebase didn't break the build, test sources included.
 #
 # Base branch resolution, first hit wins:
 #   1. explicit argument:        rebase_update.sh branch-3.5
@@ -22,10 +24,6 @@ set -ex
 
 REMOTE="${REMOTE:-upstream}"
 FORK_REMOTE="${FORK_REMOTE:-origin}"
-# Sibling of this script (resolves through the ~/bin symlink), so moving the
-# mydotfiles checkout never stales this. LOCK env var overrides.
-SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-LOCK="${LOCK:-$SCRIPT_DIR/with-test-lock}"
 
 cd "$(git rev-parse --show-toplevel)"
 BRANCH="$(git branch --show-current)"
@@ -99,12 +97,7 @@ if [ ! -x "$COAUTHOR" ]; then
 fi
 "$COAUTHOR"
 
-if git diff --name-only "$BASE_REF" HEAD | grep -qE '\.(scala|java)$'; then
-  bash "$LOCK" -- ./dev/lint-scala
-else
-  echo "no Scala/Java changes vs $BASE_REF; skipping lint-scala"
-fi
-bash "$LOCK" -- ./build/sbt -Phive compile || bash "$LOCK" -- ./build/sbt -Phive clean compile
+./build/sbt -Phive compile test:compile || ./build/sbt -Phive clean compile test:compile
 
 git push --force-with-lease "$FORK_REMOTE" "HEAD:$BRANCH"
 echo "Ok all done! (rebased onto $BASE_REF, pushed to $FORK_REMOTE/$BRANCH)"
