@@ -16,6 +16,9 @@ Explicit suite specs override the speed flags.
 
 Semi-resilient: a failing suite does not stop the run, a crashed SBT gets
 one do-over, and everything lands in target/compile-test-and-retry-logs/<ts>/.
+Each failed test is retried exactly ONCE. Fails twice -> real failure, and
+there is no flag to re-roll it further: something that flakes twice is
+something to look at.
 
 Not done on purpose: scalastyle/lint, R, docs build, MIMA (spark-presend
 covers lint; the rest is CI's job). If the diff is doc-only the script says
@@ -602,8 +605,6 @@ def main():
                     help="skip build/sbt -Phive package (only if the jar is current)")
     ap.add_argument("--dry-run", action="store_true",
                     help="print the plan and the exact commands, run nothing")
-    ap.add_argument("--retries", type=int, default=1,
-                    help="per-failed-test retries before calling it real (default 1)")
     ap.add_argument("--suite-timeout", type=int, default=90, metavar="MIN",
                     help="per-suite timeout in minutes (default 90; whole-module "
                          "runs get 8h)")
@@ -760,18 +761,15 @@ def main():
             else:
                 cmd = [venv_py, "-u", "-m", "unittest", test_name]
             rlog = logdir / ("retry-" + re.sub(r"[^\w.-]+", "_", label)[:120] + ".log")
-            attempt, ok = 0, False
-            while attempt < args.retries and not ok:
-                attempt += 1
-                rrc, _ = runner.run(cmd, rlog, env)
-                ok = rrc == 0
-            if ok:
-                flakes.append((it, label, attempt))
-                say(f"FLAKE: {label} (passed on retry {attempt})")
+            # Exactly one retry, deliberately not a knob: a test that fails
+            # twice is a thing to look at, not to re-roll until it passes.
+            rrc, _ = runner.run(cmd, rlog, env)
+            if rrc == 0:
+                flakes.append((it, label, 1))
+                say(f"FLAKE: {label} (failed in the suite run, passed on retry)")
             else:
                 real.append((it, label, rlog))
-                say(f"REAL FAILURE: {label} (still failing after {args.retries} retr"
-                    f"{'y' if args.retries == 1 else 'ies'})")
+                say(f"REAL FAILURE: {label} (failed twice -- suite run and retry)")
 
     say("=== summary ===")
     elapsed = int(time.time() - started)
@@ -783,7 +781,7 @@ def main():
         f"{len(suite_results) - green} needed a second look",
         f"flakes (failed, then passed on retry): {len(flakes)}",
     ]
-    lines += [f"  FLAKE {it.name()} :: {label} (retry {n})" for it, label, n in flakes]
+    lines += [f"  FLAKE {it.name()} :: {label}" for it, label, _ in flakes]
     lines.append(f"real failures: {len(real)}")
     lines += [f"  FAIL {it.name()} :: {label} [{lg}]" for it, label, lg in real]
     if not_retried:

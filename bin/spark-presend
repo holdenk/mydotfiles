@@ -565,8 +565,6 @@ def main():
                     help="pass --skip-build to the test phase (jar is current)")
     ap.add_argument("--mima", action="store_true",
                     help="run dev/mima (binary compat) as part of lint")
-    ap.add_argument("--retries", type=int, default=1,
-                    help="per-failed-test retries in the test phase (default 1)")
     ap.add_argument("--force", action="store_true",
                     help="run later phases even if an earlier phase is red")
     ap.add_argument("--dry-run", action="store_true",
@@ -657,7 +655,7 @@ def main():
         if not os.path.exists(TEST_RUNNER):
             die(f"{TEST_RUNNER} not found; the test phase is "
                 "spark-compile-test-and-retry")
-        cmd = [TEST_RUNNER, "--base", base_ref, "--retries", str(args.retries)]
+        cmd = [TEST_RUNNER, "--base", base_ref]
         if args.fast:
             cmd.append("--fast")
         elif args.modules:
