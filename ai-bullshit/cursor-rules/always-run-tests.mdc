@@ -43,7 +43,7 @@ coverage for the JVM side.
 
 ## Compile+test with retries: `spark-compile-test-and-retry`
 
-`bash ~/bin/spark-compile-test-and-retry` from the worktree root is
+`~/bin/spark-compile-test-and-retry` from the worktree root is
 the build+test engine (formerly `spark-preflight`). It rebuilds
 (`build/sbt -Phive package`), runs the suites to completion under the test
 lock, then re-runs each failed test individually so flakes and real failures
@@ -60,7 +60,8 @@ about your changes -- the after-run is still required.
 Three speeds: default is ALL the tests (every SBT module's test phase plus
 every PySpark test module -- days), `--modules` is every suite in every
 touched module (hours), `--fast` is just the diff-derived suites (only when
-Holden said she is in a hurry). Explicit suite specs override the speed.
+Holden said she is in a hurry). Explicit suite specs override the speed, but
+only on spark-compile-test-and-retry.
 
 It is long. Background it (`block_until_ms: 0` / `run_in_background`) and
 read the log; do not sit in a 30s foreground shell.
@@ -72,8 +73,9 @@ read the log; do not sit in a 30s foreground shell.
   `*.md`, `*.rst`) are exempt -- both scripts no-op on a doc-only diff.
 - `--skip-build` only when the jar is known current (you just built it).
   `--dry-run` prints the plan. `--base <ref>` for release branches.
-  Explicit suites: `'*RocksDBSuite*'`, `sql/'*Foo*'`,
-  `pyspark.sql.tests.test_foo`.
+- Explicit suites go to the test engine, not the gate: `spark-presend` takes no
+ positional argument and errors out on one. Run
+ `~/bin/spark-compile-test-and-retry '*RocksDBSuite*'` instead.
 - The **test phase** moves `JAVA_HOME` off a nix JDK onto a system one, and
  refuses to pick a JDK Spark rejects. `spark-presend` itself does not: its lint
  phase runs under whatever `JAVA_HOME` you gave it.
@@ -85,7 +87,7 @@ read the log; do not sit in a 30s foreground shell.
 
 ## Pre-send: `spark-presend`
 
-`bash ~/bin/spark-presend` from the worktree root is THE gate before
+`~/bin/spark-presend` from the worktree root is THE gate before
 opening/updating a PR -- use it for everything. It auto-detects the base
 branch (open PR via gh, else the branch name, else master; `--base`
 overrides), then runs: static checks (conf `.version()` vs the base

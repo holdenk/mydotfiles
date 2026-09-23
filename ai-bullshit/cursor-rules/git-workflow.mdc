@@ -7,7 +7,7 @@ alwaysApply: true
 
 ## Before pushing a Spark branch: spark-presend
 
-Run `bash ~/bin/spark-presend` from the worktree root and wait for
+Run `~/bin/spark-presend` from the worktree root and wait for
 the result before any push to the fork. Static checks, lint, then
 `spark-compile-test-and-retry` for the tests -- ALL of them by default
 (days; background it), `--modules` or `--fast` only when told to hurry.
@@ -30,7 +30,7 @@ the merge commit exists. Finish the job, in this order, without being asked:
 2. **Run the tests** for whatever the branch touches, plus anything the merge
    plausibly disturbed -- Scala `testOnly` if Scala/Java moved, not just
    Python. Same lock. Wait if all 5 slots are taken.
-   `bash ~/bin/spark-compile-test-and-retry --fast` does steps 1-2 in
+   `~/bin/spark-compile-test-and-retry --fast` does steps 1-2 in
    one shot (a merge needs the diff-derived suites, not the full suite).
 3. **Green -> push** the branch to the fork.
 4. **Red -> fix the failures first, then push.** Do not push a branch with known

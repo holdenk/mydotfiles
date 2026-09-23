@@ -109,7 +109,7 @@ Python tests against a stale jar are a lie. Before PySpark tests:
 
 ### Pre-send gate: `spark-presend` (test engine: `spark-compile-test-and-retry`)
 
-`bash ~/bin/spark-presend` from the worktree root is THE gate before
+`~/bin/spark-presend` from the worktree root is THE gate before
 pushing a Spark branch -- use it for everything. Static checks, lint, then
 the test phase. The test phase is `spark-compile-test-and-retry` (formerly
 `spark-preflight`): rebuilds (`build/sbt -Phive package`), runs the suites
@@ -124,7 +124,8 @@ the start is fine as a baseline to see what's already broken (and makes
 later failures easier to attribute), but a baseline green says nothing
 about your changes -- the after-run is still required.
 
-Three speeds, same flags in both scripts: default is ALL the tests (every
+Three speeds, same flags in both scripts (suite specs excepted -- see below):
+default is ALL the tests (every
 SBT module's test phase plus every PySpark test module -- days),
 `--modules` is every suite in touched modules (hours), `--fast` is
 diff-derived suites only (when Holden said she is in a hurry). Explicit
@@ -137,8 +138,12 @@ It is long; run it in the background and read the log.
   it** before declaring done. Pure doc changes (`docs/`, `*.md`, `*.rst`)
   are exempt -- the scripts no-op on a doc-only diff.
 - `--skip-build` only when the jar is known current. `--dry-run` prints the
-  plan. `--base <ref>` for release branches. Explicit suites:
-  `'*RocksDBSuite*'`, `sql/'*Foo*'`, `pyspark.sql.tests.test_foo`.
+  plan. `--base <ref>` for release branches.
+- **Explicit suites go to the test engine, not the gate.** `spark-presend` has
+  no positional argument and errors out on one; run
+  `~/bin/spark-compile-test-and-retry '*RocksDBSuite*'` (or `sql/'*Foo*'`, or
+  `pyspark.sql.tests.test_foo`) directly. Dropping the spec to make the error go
+  away runs the default -- ALL the tests, days of it.
 - The **test phase** moves `JAVA_HOME` off a nix JDK onto a system one, and
   refuses to pick a JDK Spark rejects. `spark-presend` itself does not: its lint
   phase runs under whatever `JAVA_HOME` you gave it.
@@ -193,7 +198,7 @@ asked:
 2. **Run the tests** for whatever the branch touches, plus anything the
    merge plausibly disturbed -- Scala `testOnly` if Scala/Java moved, not
    just Python. Same lock. Wait if all 5 slots are taken.
-   `bash ~/bin/spark-compile-test-and-retry --fast` does steps 1-2 in
+   `~/bin/spark-compile-test-and-retry --fast` does steps 1-2 in
    one shot (a merge needs the diff-derived suites, not the full suite).
 3. **Green -> push** the branch to the fork.
 4. **Red -> fix the failures first, then push.** Do not push a branch with

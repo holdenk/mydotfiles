@@ -37,7 +37,7 @@ Python tests against a stale jar are a lie. Before PySpark tests:
 
 ## Pre-send gate: `spark-presend` (test engine: `spark-compile-test-and-retry`)
 
-`bash ~/bin/spark-presend` from the worktree root is THE gate before
+`~/bin/spark-presend` from the worktree root is THE gate before
 pushing a Spark branch -- use it for everything. Static checks, lint, then
 the test phase. The test phase is `spark-compile-test-and-retry` (formerly
 `spark-preflight`): rebuilds (`build/sbt -Phive package`), runs the suites
@@ -53,7 +53,8 @@ the start is fine as a baseline to see what's already broken (and makes
 later failures easier to attribute), but a baseline green says nothing
 about your changes -- the after-run is still required.
 
-Three speeds, same flags in both scripts: default is ALL the tests (every
+Three speeds, same flags in both scripts (suite specs excepted -- see below):
+default is ALL the tests (every
 SBT module's test phase plus every PySpark test module -- days),
 `--modules` is every suite in touched modules (hours), `--fast` is
 diff-derived suites only (when Holden said she is in a hurry). Explicit
@@ -68,8 +69,11 @@ foreground shell hitting the timeout.
   are exempt -- the scripts no-op on a doc-only diff.
 - `--skip-build` only when the jar is known current (you just built it).
   `--dry-run` prints the plan. `--base <ref>` for release branches.
-  Explicit suites: `'*RocksDBSuite*'`, `sql/'*Foo*'`,
-  `pyspark.sql.tests.test_foo`.
+- **Explicit suites go to the test engine, not the gate.** `spark-presend` takes
+  no positional argument and errors out on one -- run
+  `~/bin/spark-compile-test-and-retry '*RocksDBSuite*'` (or `sql/'*Foo*'`, or
+  `pyspark.sql.tests.test_foo`). Dropping the spec to clear the error runs ALL
+  the tests.
 - The **test phase** moves `JAVA_HOME` off a nix JDK onto a system one, and
   refuses to pick a JDK Spark rejects. `spark-presend` itself does not: its lint
   phase runs under whatever `JAVA_HOME` you gave it.

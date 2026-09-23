@@ -105,7 +105,7 @@ with `RUN_HYPOTHESIS_MAX_EXAMPLES=200` locally. Details in
 `~/.cursor/rules/spark-pyspark.mdc` and `~/.claude/CLAUDE.md`.
 
 Pre-send before pushing a Spark branch:
-`bash ~/bin/spark-presend` from the worktree root (background it,
+`~/bin/spark-presend` from the worktree root (background it,
 it is long). Static checks, lint, then `spark-compile-test-and-retry` for
 tests -- ALL of them by default (days); `--modules` (hours) or `--fast`
 only when told to hurry. Exit non-zero = fix before pushing. Also suggest
