@@ -34,7 +34,15 @@
 # --print-base resolves and prints the base branch, then exits. Flags and
 # the positional base argument can come in any order.
 
-set -ex
+# xtrace, except for --print-base: that is a contract other scripts read
+# (spark-presend), and its stderr has to be real messages only. Multi-line xtrace
+# continuations do not start with "+", so a caller cannot filter them reliably and
+# the actual reason scrolls out of view. Decided before `set -x` so nothing traces
+# at all -- checking after the arg loop still leaks the startup lines.
+case " $* " in
+  (*" --print-base "*) set -e ;;
+  (*)                  set -ex ;;
+esac
 
 # REBASE_UPDATE_REMOTE first: squash-magic.sh and update-bases.sh read a bare
 # $REMOTE too and default it differently (origin, apache-github), so exporting
