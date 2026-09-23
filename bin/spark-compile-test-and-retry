@@ -50,7 +50,8 @@ from pathlib import Path
 # Sibling of this script (resolves through the ~/bin symlink), so moving
 # the mydotfiles checkout never stales this.
 LOCK_HELPER = str(Path(__file__).resolve().parent / "with-test-lock")
-JDK_BUG_URL = "https://bugs.openjdk.org/browse/JDK-8377811"
+# One source of truth for "which JDK does THIS branch accept" -- see resolve_jdk().
+JDK_HELPER = str(Path(__file__).resolve().parent / "set_spark_jdk_to_ok")
 LOCK_DIR = "/tmp/test-lock"
 LOCK_SLOTS = 5
 
@@ -542,7 +543,7 @@ def parse_py_failures(logfile):
 def jdk_version(java_home):
     """java.version for a JDK directory, or None if it has no runnable java.
     os.access, not exists(): a root-owned or half-extracted JDK has a bin/java
-    that cannot be run, and system_jdk() probes every dir under /usr/lib/jvm.
+    that cannot be run.
     javac too: a JRE-only tree (Debian's openjdk-21-jre-headless creates one)
     reports a fine java.version and then fails every build with "Unable to
     locate a Java Compiler"."""
@@ -558,26 +559,6 @@ def jdk_version(java_home):
     return m.group(1) if m else None
 
 
-def spark_jdk_ok(ver):
-    """Whether Spark will accept this java.version, matching SparkBuild's
-    checkJavaVersion: 17.0.11 minimum, and no Java 25 below 25.0.3, where
-    JDK-8377811 lets G1 move pinned objects and crashes JNI code."""
-    parts = (ver or "").split(".")
-    m = re.match(r"\d+", parts[0] or "")
-    if not m:
-        return False
-    feature = int(m.group())
-    update = 0
-    if len(parts) > 2:
-        m = re.match(r"\d+", parts[2])
-        update = int(m.group()) if m else 0
-    if feature == 25:
-        return update >= 3
-    if feature == 17:
-        return update >= 11
-    return feature > 17
-
-
 def is_nix_jdk(java_home):
     try:
         return str((Path(java_home) / "bin" / "java").resolve()).startswith("/nix/store/")
@@ -585,64 +566,53 @@ def is_nix_jdk(java_home):
         return False
 
 
-def system_jdk(want_feature):
-    """A Spark-acceptable JDK under /usr/lib/jvm, preferring the feature version
-    asked for (so repointing does not change which Spark branch builds), then 21,
-    then 17. Only ones spark_jdk_ok() accepts are candidates -- matching the
-    nix JDK's version is not a reason to pin a Java 11 or a 25.0.1."""
-    byfeature = {}
-    for d in sorted(Path("/usr/lib/jvm").glob("*")):
-        ver = jdk_version(d)
-        if ver and spark_jdk_ok(ver):
-            byfeature.setdefault(ver.split(".")[0], str(d))
-    for f in ([want_feature] if want_feature else []) + ["21", "17"]:
-        if f in byfeature:
-            return byfeature[f]
-    return next(iter(byfeature.values()), None)
+def resolve_jdk(root):
+    """Pin JAVA_HOME to a JDK THIS worktree accepts, and keep it off nix.
 
+    Delegated to set_spark_jdk_to_ok so the rule lives in one place: it reads
+    docs/index.md, pom.xml's java.minimum.version and SparkBuild's version veto
+    out of the branch in front of it. The copy that used to be here hardcoded
+    master's rule and applied it everywhere, which misfired both ways -- it
+    warned that a supported 17.0.9 "will fail in checkJavaVersion" on
+    branch-3.5, which has no checkJavaVersion at all, and it would repoint a
+    4.0/4.1 worktree onto a system Java 25 those branches do not accept.
 
-def resolve_jdk():
-    """Pin JAVA_HOME to the JDK the build will actually use, and keep it off nix.
-
-    build/sbt takes $JAVA_HOME/bin/java whenever that exists, so the java on
-    PATH is not the one doing the build and reporting it would be a lie. And a
-    nix JDK's loader looks for its cache under its own prefix, never finds
-    libstdc++, so rocksdbjni/leveldbjni cannot dlopen and every state-store
-    suite dies with UnsatisfiedLinkError -- repoint it now rather than three
-    hours into a run.
+    build/sbt takes $JAVA_HOME/bin/java whenever that is executable
+    (sbt-launch-lib.bash:22), so this is the java that does the build and the
+    only one worth reporting. And a nix JDK's loader looks for its cache under
+    its own prefix, never finds libstdc++, so rocksdbjni/leveldbjni cannot
+    dlopen and every state-store suite dies with UnsatisfiedLinkError -- better
+    to find that out now than three hours into a run.
     """
+    if os.access(JDK_HELPER, os.X_OK):
+        p = subprocess.run([JDK_HELPER], cwd=root, capture_output=True, text=True)
+        for line in p.stdout.splitlines():
+            if line.startswith("export JAVA_HOME="):
+                home = line.split("=", 1)[1].strip()
+                os.environ["JAVA_HOME"] = home
+                return home, jdk_version(home) or "?"
+        say(f"{Path(JDK_HELPER).name} could not pick a JDK for this branch:")
+        for line in p.stderr.strip().splitlines()[-4:]:
+            say(f"  {line}")
+    else:
+        say(f"{JDK_HELPER} is missing; not checking the JDK against this branch")
+    # Fallback: no per-branch rule available, so only the thing that is true on
+    # every branch -- a nix JDK cannot load the JNI libs.
     home = os.environ.get("JAVA_HOME") or ""
-    # X_OK, not exists(): build/sbt-launch-lib.bash:22 is `test -x
-    # "$JAVA_HOME/bin/java"` and silently falls back to PATH's java otherwise,
-    # so a non-executable bin/java here would leave sbt on the nix JDK while
-    # this script reported the other one.
     if not home or not os.access(Path(home) / "bin" / "java", os.X_OK):
         found = shutil.which("java")
         if not found:
             die("no usable JAVA_HOME and no java on PATH")
         home = str(Path(found).resolve().parent.parent)
+        os.environ["JAVA_HOME"] = home
     if is_nix_jdk(home):
-        ver = jdk_version(home) or ""
-        alt = system_jdk(ver.split(".")[0] if ver else None)
-        if alt:
-            say(f"JAVA_HOME was nix-provided ({home}); using {alt} instead -- a "
-                "nix JDK cannot dlopen libstdc++ for RocksDB/LevelDB JNI")
-            home = alt
-        else:
-            say(f"WARNING: JAVA_HOME={home} is nix-provided and /usr/lib/jvm has "
-                "no usable JDK; RocksDB/LevelDB suites will fail to load their "
-                "native libs")
-    os.environ["JAVA_HOME"] = home
-    ver = jdk_version(home) or "?"
-    if not spark_jdk_ok(ver):
-        say(f"WARNING: Java {ver} at {home} is one Spark refuses (17.0.11 "
-            f"minimum, and 25 needs 25.0.3 for {JDK_BUG_URL}); every compile "
-            "will fail in checkJavaVersion")
-    return home, ver
+        say(f"WARNING: JAVA_HOME={home} is nix-provided; RocksDB/LevelDB suites "
+            "will fail to dlopen their native libs (UnsatisfiedLinkError)")
+    return home, jdk_version(home) or "?"
 
 
 def env_checks(root, venv_py, need_py):
-    java_home, java_ver = resolve_jdk()
+    java_home, java_ver = resolve_jdk(root)
     if need_py:
         # A wrong-interpreter venv is the same lie as a stale jar. The shared
         # venv broke once already when an OS update moved /usr/bin/python3

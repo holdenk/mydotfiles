@@ -246,7 +246,11 @@ if [ -n "$JDK_DEFAULT" ] || [ -n "$SPARK35_JDK" ]; then
             print l[i]
           }
         }' "$rc" >"$rc.mydotfiles.tmp"
-      mv "$rc.mydotfiles.tmp" "$rc"
+      # cat, not mv: if $rc is a symlink (someone pointing ~/.bashrc at a
+      # tracked copy), mv replaces the LINK with a regular file at umask mode
+      # and silently orphans the target -- while the append below follows the
+      # link. Writing through keeps whatever $rc is, and its mode.
+      cat "$rc.mydotfiles.tmp" >"$rc" && rm -f "$rc.mydotfiles.tmp"
     fi
     {
       printf '\n# mydotfiles: JAVA_HOME (setup-shared). Override per Spark branch as needed.\n'

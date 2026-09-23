@@ -181,9 +181,14 @@ for branch in "$@"; do
     rc=$?
     git rebase --abort 2>/dev/null || true
     if [ "$(git rev-parse HEAD)" != "$PRE_RUN" ]; then
-      git switch --quiet "$branch" 2>/dev/null || true
-      git reset --hard "$PRE_RUN"
-      FAILED+=("$branch (rebase_update rc=$rc, rolled back to $PRE_RUN)")
+      # Do not swallow a failed switch: reset --hard would then move a DETACHED
+      # HEAD while refs/heads/$branch stayed rewritten, and the summary would
+      # still claim it rolled back. Say what actually happened instead.
+      if git switch --quiet "$branch" 2>/dev/null && git reset --hard "$PRE_RUN"; then
+        FAILED+=("$branch (rebase_update rc=$rc, rolled back to $PRE_RUN)")
+      else
+        FAILED+=("$branch (rebase_update rc=$rc, ROLLBACK FAILED -- still rewritten, expected $PRE_RUN)")
+      fi
     else
       FAILED+=("$branch (rebase_update rc=$rc)")
     fi
