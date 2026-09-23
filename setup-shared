@@ -161,14 +161,18 @@ else
   [ -n "${JAVA_HOME:-}" ] && check_jdk_for_spark "$JAVA_HOME" "inherited JAVA_HOME"
 fi
 
-# RocksDB/LevelDB JNI needs libstdc++, and a nix JDK cannot find it: nix's
-# glibc loader never reads /etc/ld.so.cache, so libstdc++.so.6 sits in /lib64
-# and a native lib extracted from a jar (rocksdbjni, leveldbjni) still fails to
-# dlopen it. Reads like a missing package and isn't. A system JDK has no such
-# problem, which is what JAVA_HOME above points at -- so warn rather than
-# "fix" it here. Do NOT export LD_LIBRARY_PATH=/lib64 to paper over it: that
-# applies to every process, and nix binaries built against a newer glibc then
-# resolve libc.so.6 from /lib64 and die ("version `GLIBC_2.38' not found").
+# RocksDB/LevelDB JNI needs libstdc++, and a nix JDK cannot find it. Its loader
+# looks for a cache under its own prefix (/nix/store/...-glibc-*/etc/ld.so.cache)
+# rather than /etc/ld.so.cache; that file does not exist, so it has no cache at
+# all and falls back to the two dirs compiled into it -- nix's glibc and libgcc.
+# Neither has libstdc++.so.6, and /lib64 is never consulted, so a native lib
+# extracted from a jar (rocksdbjni, leveldbjni) fails to dlopen. Reads like a
+# missing package and isn't. A system JDK has no such problem, which is what
+# JAVA_HOME above points at -- so warn rather than "fix" it here.
+# Do NOT export LD_LIBRARY_PATH=/lib64 to paper over it: that applies to every
+# process and outranks each binary's RUNPATH, so nix binaries built against a
+# newer glibc resolve libc.so.6 from /lib64 and die -- `xargs` included:
+#   /lib64/libc.so.6: version `GLIBC_2.38' not found (required by xargs)
 case "$(readlink -f "${JAVA_HOME:-}/bin/java" 2>/dev/null)" in
   /nix/store/*)
     echo "WARNING: JAVA_HOME=$JAVA_HOME is nix-provided. Its loader ignores" >&2
