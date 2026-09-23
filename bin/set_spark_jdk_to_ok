@@ -111,13 +111,19 @@ _ssjo_wants() {
 }
 
 _ssjo_main() {
+  # Recognise our flags and ignore everything else -- deliberately not an
+  # exhaustive case with an error arm. A sourced file inherits the CALLER's
+  # positional parameters, so `source set_spark_jdk_to_ok` inside a script run
+  # as `wrapper.sh branch-4.0` sees branch-4.0 as $1 with no way to tell it from
+  # an argument meant for us. Rejecting it left JAVA_HOME on the nix JDK, which
+  # is the failure this script exists to prevent.
   _ssjo_force=0
-  case "${1:-}" in
-    -h|--help) _ssjo_usage; return 0 ;;
-    -f|--force) _ssjo_force=1 ;;
-    "") ;;
-    *) _ssjo_say "unknown argument: $1"; _ssjo_usage; return 2 ;;
-  esac
+  for _ssjo_a in "$@"; do
+    case "$_ssjo_a" in
+      -h|--help) _ssjo_usage; return 0 ;;
+      -f|--force) _ssjo_force=1 ;;
+    esac
+  done
 
   _ssjo_root=$(git rev-parse --show-toplevel 2>/dev/null)
   if [ -z "$_ssjo_root" ] \
