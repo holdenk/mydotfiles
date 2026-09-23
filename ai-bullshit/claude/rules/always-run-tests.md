@@ -70,6 +70,9 @@ foreground shell hitting the timeout.
   `--dry-run` prints the plan. `--base <ref>` for release branches.
   Explicit suites: `'*RocksDBSuite*'`, `sql/'*Foo*'`,
   `pyspark.sql.tests.test_foo`.
+- The **test phase** moves `JAVA_HOME` off a nix JDK onto a system one, and
+  refuses to pick a JDK Spark rejects. `spark-presend` itself does not: its lint
+  phase runs under whatever `JAVA_HOME` you gave it.
 - It sets the RocksDB-relevant env itself (AWS vars genuinely unset,
   `SPARK_LOCAL_IP/HOSTNAME`, `SPARK_LOCAL_DIRS` on the worktree disk for
   PySpark, exec-check on `/tmp` for the JNI extract, nofile bump) and

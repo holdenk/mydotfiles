@@ -139,6 +139,9 @@ It is long; run it in the background and read the log.
 - `--skip-build` only when the jar is known current. `--dry-run` prints the
   plan. `--base <ref>` for release branches. Explicit suites:
   `'*RocksDBSuite*'`, `sql/'*Foo*'`, `pyspark.sql.tests.test_foo`.
+- The **test phase** moves `JAVA_HOME` off a nix JDK onto a system one, and
+  refuses to pick a JDK Spark rejects. `spark-presend` itself does not: its lint
+  phase runs under whatever `JAVA_HOME` you gave it.
 - It sets the RocksDB-relevant env itself (AWS vars genuinely unset,
   `SPARK_LOCAL_IP/HOSTNAME`, `SPARK_LOCAL_DIRS` on the worktree disk for
   PySpark, `/tmp` exec-check for the JNI extract, nofile bump) and
@@ -341,11 +344,35 @@ What is already installed, in the places it hides:
     ls -d ~/.sdkman/candidates/java/*       # sdkman, if it is set up
     ls -d /nix/store/*/bin/java             # nix-installed JDKs
 
-`setup-shared` defaults `JAVA_HOME` to `/usr/lib/jvm/temurin-21-jdk` when that
-exists -- 21 because 4.0/4.1 take 17/21 only and 25 is master-only. A default,
-not a constraint: override per branch, e.g.
-`JAVA_HOME=/usr/lib/jvm/temurin-17-jdk build/sbt -Phive package` for a 3.5
-backport.
+`setup-shared` defaults `JAVA_HOME` to a Java 21 JDK under `/usr/lib/jvm` when
+the box has one -- 21 because 4.0/4.1 take 17/21 only and 25 is master-only. It
+finds it by feature version, so the distro's naming (`temurin-21-jdk`,
+`temurin-21-jdk-arm64`, `java-21-openjdk-amd64`) does not matter. A default, not
+a constraint: override per branch.
+
+It also exports **`SPARK35_JAVA_HOME`**, a Java 17. Nothing reads it
+automatically -- it is there so a branch-3.5 backport can say
+
+    JAVA_HOME=$SPARK35_JAVA_HOME build/sbt -Phive package
+
+instead of going JDK hunting. Both come from the rc file, so a non-interactive
+shell may have neither; check before relying on it.
+
+Neither is per-branch, though, so to just get it right for the worktree you are
+in, **source `set_spark_jdk_to_ok`**:
+
+    source ~/bin/set_spark_jdk_to_ok        # or: eval "$(set_spark_jdk_to_ok)"
+
+It reads the constraints out of that worktree instead of guessing: `docs/index.md`
+for the supported list, `pom.xml`'s `java.minimum.version` and SparkBuild's
+version veto for the floors. That matters because the branches disagree --
+branch-3.5 says Java 8/11/17 and has no `java.minimum.version` and no
+`checkJavaVersion` at all, so "newest that clears the minimum" hands it a 25 and
+nothing in the build catches it. It prefers 21 then 17, never picks a nix JDK,
+and leaves a JAVA_HOME the branch already accepts alone -- which makes it sticky,
+since a 17 picked for a 3.5 backport is still legal on master, so pass `-f` to get
+the branch's preferred JDK regardless. Source it: run plainly it can only print
+the export line, because a child cannot set its parent's environment.
 
 Use a **system** JDK from `/usr/lib/jvm`, not a nix one, for anything that
 touches RocksDB or LevelDB. A nix JDK's loader looks for its cache under its

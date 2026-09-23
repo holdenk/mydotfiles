@@ -69,9 +69,20 @@ reason, so this is loud, not mysterious.
 
 To see what the host already has: `ls -l /usr/lib/jvm`,
 `ls -l /etc/alternatives | grep -i java`, `ls -d ~/.sdkman/candidates/java/*`,
-`ls -d /nix/store/*/bin/java`. `setup-shared` defaults `JAVA_HOME` to
-`/usr/lib/jvm/temurin-21-jdk` when present (4.0/4.1 take 17/21 only, 25 is
-master-only) -- a default, override per branch.
+`ls -d /nix/store/*/bin/java`. `setup-shared` defaults `JAVA_HOME` to a Java 21
+JDK under `/usr/lib/jvm`, found by feature version so distro naming does not
+matter (4.0/4.1 take 17/21 only, 25 is master-only) -- a default, override per
+branch. It also exports `SPARK35_JAVA_HOME` (a Java 17); nothing reads it
+automatically, use it for a 3.5 backport:
+`JAVA_HOME=$SPARK35_JAVA_HOME build/sbt -Phive package`.
+
+For the branch you are actually in, `source ~/bin/set_spark_jdk_to_ok` (or
+`eval "$(set_spark_jdk_to_ok)"`). It reads `docs/index.md`, `pom.xml`'s
+`java.minimum.version` and SparkBuild's version veto out of the worktree, so it
+gets 3.5 right -- 3.5 says Java 8/11/17 and has no `checkJavaVersion`, so
+"newest that clears the minimum" would hand it a 25. Prefers 21 then 17, never a
+nix JDK, and leaves an already-acceptable JAVA_HOME alone (`-f` re-picks anyway,
+for when a 3.5 backport's 17 is still sitting there on master).
 
 Use a **system** JDK from `/usr/lib/jvm`, never a nix one, for RocksDB/LevelDB
 suites: a nix JDK's loader never reads `/etc/ld.so.cache`, so the native lib
