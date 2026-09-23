@@ -50,6 +50,7 @@ from pathlib import Path
 # Sibling of this script (resolves through the ~/bin symlink), so moving
 # the mydotfiles checkout never stales this.
 LOCK_HELPER = str(Path(__file__).resolve().parent / "with-test-lock")
+JDK_BUG_URL = "https://bugs.openjdk.org/browse/JDK-8377811"
 LOCK_DIR = "/tmp/test-lock"
 LOCK_SLOTS = 5
 
@@ -532,9 +533,103 @@ def parse_py_failures(logfile):
 
 # --- environment checks ---------------------------------------------------------
 
+def jdk_version(java_home):
+    """java.version for a JDK directory, or None if it has no runnable java.
+    os.access, not exists(): a root-owned or half-extracted JDK has a bin/java
+    that cannot be run, and system_jdk() probes every dir under /usr/lib/jvm."""
+    java = Path(java_home) / "bin" / "java"
+    if not os.access(java, os.X_OK):
+        return None
+    try:
+        p = subprocess.run([str(java), "-XshowSettings:properties", "-version"],
+                           capture_output=True, text=True)
+    except OSError:
+        return None
+    m = re.search(r"^\s*java\.version = (\S+)", p.stdout + p.stderr, re.M)
+    return m.group(1) if m else None
+
+
+def spark_jdk_ok(ver):
+    """Whether Spark will accept this java.version, matching SparkBuild's
+    checkJavaVersion: 17.0.11 minimum, and no Java 25 below 25.0.3, where
+    JDK-8377811 lets G1 move pinned objects and crashes JNI code."""
+    parts = (ver or "").split(".")
+    m = re.match(r"\d+", parts[0] or "")
+    if not m:
+        return False
+    feature = int(m.group())
+    update = 0
+    if len(parts) > 2:
+        m = re.match(r"\d+", parts[2])
+        update = int(m.group()) if m else 0
+    if feature == 25:
+        return update >= 3
+    if feature == 17:
+        return update >= 11
+    return feature > 17
+
+
+def is_nix_jdk(java_home):
+    try:
+        return str((Path(java_home) / "bin" / "java").resolve()).startswith("/nix/store/")
+    except OSError:
+        return False
+
+
+def system_jdk(want_feature):
+    """A Spark-acceptable JDK under /usr/lib/jvm, preferring the feature version
+    asked for (so repointing does not change which Spark branch builds), then 21,
+    then 17. Only ones spark_jdk_ok() accepts are candidates -- matching the
+    nix JDK's version is not a reason to pin a Java 11 or a 25.0.1."""
+    byfeature = {}
+    for d in sorted(Path("/usr/lib/jvm").glob("*")):
+        ver = jdk_version(d)
+        if ver and spark_jdk_ok(ver):
+            byfeature.setdefault(ver.split(".")[0], str(d))
+    for f in ([want_feature] if want_feature else []) + ["21", "17"]:
+        if f in byfeature:
+            return byfeature[f]
+    return next(iter(byfeature.values()), None)
+
+
+def resolve_jdk():
+    """Pin JAVA_HOME to the JDK the build will actually use, and keep it off nix.
+
+    build/sbt takes $JAVA_HOME/bin/java whenever that exists, so the java on
+    PATH is not the one doing the build and reporting it would be a lie. And a
+    nix JDK's loader looks for its cache under its own prefix, never finds
+    libstdc++, so rocksdbjni/leveldbjni cannot dlopen and every state-store
+    suite dies with UnsatisfiedLinkError -- repoint it now rather than three
+    hours into a run.
+    """
+    home = os.environ.get("JAVA_HOME") or ""
+    if not home or not (Path(home) / "bin" / "java").exists():
+        found = shutil.which("java")
+        if not found:
+            die("no usable JAVA_HOME and no java on PATH")
+        home = str(Path(found).resolve().parent.parent)
+    if is_nix_jdk(home):
+        ver = jdk_version(home) or ""
+        alt = system_jdk(ver.split(".")[0] if ver else None)
+        if alt:
+            say(f"JAVA_HOME was nix-provided ({home}); using {alt} instead -- a "
+                "nix JDK cannot dlopen libstdc++ for RocksDB/LevelDB JNI")
+            home = alt
+        else:
+            say(f"WARNING: JAVA_HOME={home} is nix-provided and /usr/lib/jvm has "
+                "no usable JDK; RocksDB/LevelDB suites will fail to load their "
+                "native libs")
+    os.environ["JAVA_HOME"] = home
+    ver = jdk_version(home) or "?"
+    if not spark_jdk_ok(ver):
+        say(f"WARNING: Java {ver} at {home} is one Spark refuses (17.0.11 "
+            f"minimum, and 25 needs 25.0.3 for {JDK_BUG_URL}); every compile "
+            "will fail in checkJavaVersion")
+    return home, ver
+
+
 def env_checks(root, venv_py, need_py):
-    if not shutil.which("java"):
-        die("java not on PATH")
+    java_home, java_ver = resolve_jdk()
     if need_py:
         # A wrong-interpreter venv is the same lie as a stale jar. The shared
         # venv broke once already when an OS update moved /usr/bin/python3
@@ -581,7 +676,8 @@ def env_checks(root, venv_py, need_py):
         for l in orphans[:5]:
             say(f"  {l.strip()}")
     (Path(root) / "target" / "tmp").mkdir(parents=True, exist_ok=True)
-    say(f"env ok: java={subprocess.run(['java', '-version'], capture_output=True, text=True).stderr.splitlines()[0] if shutil.which('java') else '?'}")
+    # JAVA_HOME, not PATH's java: sbt follows the former (build/sbt-launch-lib).
+    say(f"env ok: java={java_ver} at {java_home}")
     say(f"env ok: python={venv_py}")
 
 
@@ -765,7 +861,7 @@ def main():
             # twice is a thing to look at, not to re-roll until it passes.
             rrc, _ = runner.run(cmd, rlog, env)
             if rrc == 0:
-                flakes.append((it, label, 1))
+                flakes.append((it, label))
                 say(f"FLAKE: {label} (failed in the suite run, passed on retry)")
             else:
                 real.append((it, label, rlog))
@@ -781,7 +877,7 @@ def main():
         f"{len(suite_results) - green} needed a second look",
         f"flakes (failed, then passed on retry): {len(flakes)}",
     ]
-    lines += [f"  FLAKE {it.name()} :: {label}" for it, label, _ in flakes]
+    lines += [f"  FLAKE {it.name()} :: {label}" for it, label in flakes]
     lines.append(f"real failures: {len(real)}")
     lines += [f"  FAIL {it.name()} :: {label} [{lg}]" for it, label, lg in real]
     if not_retried:
