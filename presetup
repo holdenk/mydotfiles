@@ -1,10 +1,14 @@
 #!/bin/bash
 set -e
 set -x
-mkdir -p /tmp/bloop
-cd /tmp/bloop
 apt-get -y install git
-git clone https://github.com/holdenk/mydotfiles.git
+# ~, not /tmp: setup-shared points ~/bin, ~/AGENTS.md, ~/.cursor/{rules,hooks}
+# and ~/.claude/{CLAUDE.md,rules} at wherever this checkout lives, and also writes
+# that path into init.templateDir. Cloning to /tmp meant every one of those went
+# dangling at the first tmpfiles cleanup, silently taking the commit-msg
+# co-author hook with it.
+cd ~
+[ -d mydotfiles ] || git clone https://github.com/holdenk/mydotfiles.git
 cd mydotfiles
 ./setup-full
 ./postsetup.sh

@@ -200,7 +200,11 @@ if [ -n "$JDK_DEFAULT" ]; then
 else
   echo "no Java 21 JDK under $JVM_DIR; leaving JAVA_HOME=${JAVA_HOME:-unset} alone" >&2
   # Nothing of ours to set, so vet whatever the box already points at.
-  [ -n "${JAVA_HOME:-}" ] && check_jdk_for_spark "$JAVA_HOME" "inherited JAVA_HOME"
+  # || true: this is the only call site a bad JDK can actually trip (the other
+  # two are a 21 and a 17), and a failing RIGHT side of && is NOT exempt from
+  # set -e -- so without this the return 1 kills the sourcing parent exactly
+  # like the exit it replaced.
+  [ -n "${JAVA_HOME:-}" ] && { check_jdk_for_spark "$JAVA_HOME" "inherited JAVA_HOME" || true; }
 fi
 if [ -n "$SPARK35_JDK" ]; then
   check_jdk_for_spark "$SPARK35_JDK" "SPARK35_JAVA_HOME" || true
@@ -218,6 +222,8 @@ if [ -n "$JDK_DEFAULT" ] || [ -n "$SPARK35_JDK" ]; then
   for shellrc in bashrc zshrc; do
     rc="$HOME/.$shellrc"
     [ -e "$rc" ] || command -v "${shellrc%rc}" >/dev/null 2>&1 || continue
+    # Follow a symlinked rc so the rewrite and the append below touch one file.
+    rc_target="$(readlink -f "$rc" 2>/dev/null || printf '%s' "$rc")"
     # Rewrite an existing block rather than skipping it: a box first set up when
     # these pointed at another JDK would otherwise keep pointing at it forever.
     # awk, not `sed -i '/x/,+1d'`, which is GNU-only and we have Macs. The
@@ -245,12 +251,14 @@ if [ -n "$JDK_DEFAULT" ] || [ -n "$SPARK35_JDK" ]; then
             }
             print l[i]
           }
-        }' "$rc" >"$rc.mydotfiles.tmp"
-      # cat, not mv: if $rc is a symlink (someone pointing ~/.bashrc at a
-      # tracked copy), mv replaces the LINK with a regular file at umask mode
-      # and silently orphans the target -- while the append below follows the
-      # link. Writing through keeps whatever $rc is, and its mode.
-      cat "$rc.mydotfiles.tmp" >"$rc" && rm -f "$rc.mydotfiles.tmp"
+        }' "$rc" >"$rc_target.mydotfiles.tmp"
+      # mv onto the resolved TARGET, not onto $rc. mv straight onto $rc would
+      # replace a symlinked ~/.bashrc with a regular file and orphan whatever it
+      # pointed at; `cat >"$rc"` preserves the link but truncates first, so a
+      # Ctrl-C or ENOSPC mid-write leaves an empty shell config. Resolving the
+      # link keeps both properties, and the append below follows the link to the
+      # same file.
+      mv "$rc_target.mydotfiles.tmp" "$rc_target"
     fi
     {
       printf '\n# mydotfiles: JAVA_HOME (setup-shared). Override per Spark branch as needed.\n'
@@ -321,13 +329,23 @@ fi
 # checkout that loses it bricks the agent, so set it explicitly and smoke
 # test each hook before declaring done.
 chmod +x "$REPO/ai-bullshit/cursor-hooks/"*.sh
+BAD_HOOKS=""
 for hook in block-rm-rf block-secrets inject-global-rules; do
-  out=$(echo '{}' | "$REPO/ai-bullshit/cursor-hooks/$hook.sh") || {
+  # Same reason as check_jdk_for_spark above: this file is SOURCED, so exit
+  # would abort setup-full before conda, sbt and the pip deps. Record and carry
+  # on; the summary below is loud enough, and a broken hook does not stop the
+  # rest of the box from being provisioned.
+  if ! out=$(echo '{}' | "$REPO/ai-bullshit/cursor-hooks/$hook.sh"); then
     echo "Hook $hook.sh failed to run -- fix this before using the agent" >&2
-    exit 1
-  }
-  echo "$out" | python3 -c 'import json,sys; json.load(sys.stdin)' || {
+    BAD_HOOKS="$BAD_HOOKS $hook"
+    continue
+  fi
+  if ! echo "$out" | python3 -c 'import json,sys; json.load(sys.stdin)'; then
     echo "Hook $hook.sh did not emit valid JSON" >&2
-    exit 1
-  }
+    BAD_HOOKS="$BAD_HOOKS $hook"
+  fi
 done
+if [ -n "$BAD_HOOKS" ]; then
+  echo "WARNING: broken cursor hook(s):$BAD_HOOKS -- the hooks are fail-closed," >&2
+  echo "  so Cursor tool calls will be blocked until these run and emit JSON." >&2
+fi

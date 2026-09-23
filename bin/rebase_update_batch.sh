@@ -162,7 +162,14 @@ for branch in "$@"; do
   # yet: there is nothing to fast-forward to, and pulling a nonexistent ref can
   # only fail -- which made a branch's first push through the batch impossible
   # even though rebase_update.sh handles that case fine.
-  if [ -n "$(git ls-remote --heads "$FORK_REMOTE" "refs/heads/$branch" 2>/dev/null)" ]; then
+  # Exit status, not just output: ls-remote on an unreachable remote prints
+  # nothing and fails, which the old -n test read as "not on the fork yet" -- so
+  # a network blip skipped the divergence check and said something untrue.
+  if ! FORK_LS="$(git ls-remote --heads "$FORK_REMOTE" "refs/heads/$branch")"; then
+    FAILED+=("$branch (cannot reach $FORK_REMOTE)")
+    continue
+  fi
+  if [ -n "$FORK_LS" ]; then
     if ! git pull --ff-only "$FORK_REMOTE" "$branch"; then
       FAILED+=("$branch (pull --ff-only $FORK_REMOTE)")
       continue

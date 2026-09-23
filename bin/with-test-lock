@@ -4,7 +4,12 @@
 set -euo pipefail
 
 LOCK_DIR=/tmp/test-lock
-SLOTS=5
+# The shared protocol is 5 slots. Lowering your own ceiling is fine; raising it is
+# not -- acquire() creates slot-5, slot-6 ... on demand, and every other user of
+# this box only ever probes 0-4, so those holders are invisible to exactly the
+# people the lock coordinates with.
+MAX_SLOTS=5
+SLOTS=$MAX_SLOTS
 POLL_SECS=5
 
 usage() {
@@ -27,8 +32,10 @@ clear_holder() {
 
 status() {
   mkdir -p "$LOCK_DIR"
+  # MAX_SLOTS, not SLOTS: a lowered --slots would otherwise hide holders above it,
+  # and hiding another user's build is the opposite of what this is for.
   local i
-  for i in $(seq 0 $((SLOTS - 1))); do
+  for i in $(seq 0 $((MAX_SLOTS - 1))); do
     # A successful non-blocking flock means the slot is free.
     if flock -n "$LOCK_DIR/slot-$i" true 2>/dev/null; then
       rm -f "$LOCK_DIR/slot-${i}.holder"
@@ -58,11 +65,6 @@ acquire() {
   return 1
 }
 
-# The shared protocol is 5 slots. Lowering your own ceiling is fine; raising it
-# is not -- acquire() creates slot-5, slot-6, ... on demand, and every other user
-# of this box (and --status) only ever probes 0-4, so those extra holders are
-# invisible to exactly the people the lock exists to coordinate with.
-MAX_SLOTS=5
 WANT_STATUS=0
 
 while [[ $# -gt 0 ]]; do
@@ -91,6 +93,10 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       usage
       ;;
+    -*)
+      echo "with-test-lock: unknown flag: $1" >&2
+      usage
+      ;;
     *)
       break
       ;;
@@ -98,6 +104,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "$WANT_STATUS" == 1 ]]; then
+  # Refuse rather than silently drop the command someone also passed.
+  if [[ $# -gt 0 ]]; then
+    echo "with-test-lock: --status does not run a command (got: $*)" >&2
+    exit 2
+  fi
   status
   exit 0
 fi

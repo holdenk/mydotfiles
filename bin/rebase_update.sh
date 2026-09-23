@@ -132,12 +132,26 @@ detect_base_from_name() {
       *) break ;;
     esac
   done
-  [[ "$name" =~ -(branch-)?(master|[0-9]+(\.[0-9]+|\.x)+|[0-9]+x)(-r[0-9]+)?$ ]] \
-    || return 1
-  suffix="${BASH_REMATCH[2]}"
+  # An explicit "branch-N.M" anywhere is unambiguous (it cannot be read out of
+  # ivy2.5.3), so accept it even mid-name -- my-fix-branch-3.5-backport is a real
+  # naming pattern and the anchored form alone sent it to master.
+  if [[ "$name" =~ (^|-)branch-([0-9]+(\.[0-9]+|\.x)+|[0-9]+x) ]]; then
+    suffix="${BASH_REMATCH[2]}"
+  elif [[ "$name" =~ -(branch-)?(master|[0-9]+(\.[0-9]+|\.x)+|[0-9]+x)(-r[0-9]+)?$ ]]; then
+    suffix="${BASH_REMATCH[2]}"
+  else
+    return 1
+  fi
   [[ "$suffix" =~ ^([0-9]+)x$ ]] && suffix="${BASH_REMATCH[1]}.x"
   if [ "$suffix" = "master" ]; then c="master"; else c="branch-$suffix"; fi
-  git rev-parse --verify --quiet "refs/remotes/$REMOTE/$c" >/dev/null || return 1
+  # Local ref first, then the remote -- squash-magic.sh checks refs/heads/<base>
+  # before refs/remotes/<remote>/<base> and defaults its remote to origin, so
+  # checking only $REMOTE meant a worktree holding a local branch-4.0 but no
+  # fetched upstream/branch-4.0 disagreed with it, and disagreement lands on
+  # master.
+  git rev-parse --verify --quiet "refs/heads/$c" >/dev/null \
+    || git rev-parse --verify --quiet "refs/remotes/$REMOTE/$c" >/dev/null \
+    || return 1
   echo "$c"
 }
 
@@ -170,10 +184,16 @@ if [ -z "$BASE" ]; then
   if BASE=$(detect_base_from_pr); then
     :
   elif [ "$?" = 2 ]; then
-    # Systematic (auth, network, misconfigured remote): every branch hits it, so
-    # exit 2 and let rebase_update_batch.sh stop rather than mangle the rest.
-    echo "pass the base explicitly, e.g. $0 branch-4.0" >&2
-    exit 2
+    # Systematic: auth, network, a remote URL we cannot parse. None of that says
+    # anything about which base this branch targets, and the name heuristic needs
+    # neither gh nor the URL -- so try it before refusing. Falling back to the
+    # NAME is safe; falling back to master is what exit 2 exists to prevent.
+    if BASE=$(detect_base_from_name); then
+      echo "gh lookup unavailable; using the branch name's base: $BASE" >&2
+    else
+      echo "pass the base explicitly, e.g. $0 branch-4.0" >&2
+      exit 2
+    fi
   elif BASE=$(detect_base_from_name); then
     :
   else
@@ -238,7 +258,7 @@ if [ -n "$FORK_TIP" ] && ! git merge-base --is-ancestor "$FORK_TIP" "$START_HEAD
 fi
 echo "Rebasing onto $BASE_REF ($REPLAY commit(s) to replay)"
 
-git rebase "$BASE_REF"
+run_step git rebase "$BASE_REF"
 
 # COAUTHOR env var overrides, same as LOCK_HELPER above.
 if [ -z "${COAUTHOR:-}" ]; then
@@ -263,15 +283,28 @@ done
 if [ "$MISSING_TRAILER" = "0" ]; then
   echo "every commit in $BASE_REF..HEAD already has the trailer; skipping $COAUTHOR"
 else
-  "$COAUTHOR"
+  # Wrapped too: add_coauthor.sh drives git filter-repo, a Python program whose
+  # argparse errors exit 2 -- which the batch would read as "systematic" and use
+  # to abandon every remaining branch.
+  run_step "$COAUTHOR"
   # Re-check: the two disagree on what "already has it" means. This guard wants
   # her address; add_coauthor.sh:20 skips on any `Co-authored-by:` at all, as
   # case-sensitive bytes. So a commit carrying the canonical lowercase trailer
   # for somebody else -- a cherry-pick, a GitHub squash-merge trailer -- sets
   # MISSING_TRAILER=1, then gets skipped, and the only check after it is the
   # ancestry one below, which passes. Branch pushed without her trailer, silently.
+  # Into a variable first: a failing command substitution is exempt from set -e,
+  # so a $BASE_REF that stopped resolving (worktrees share refs, and a sibling
+  # tree's `git fetch --prune` can delete it during the long rewrite) yielded an
+  # empty list, left STILL_MISSING at 0, and pushed. Same "git's 128 hides as
+  # nothing" trap as the CHANGED= line below.
+  if ! POST_REV="$(git rev-list "$BASE_REF..HEAD")"; then
+    echo "cannot list $BASE_REF..HEAD after the rewrite, so the trailer cannot" >&2
+    echo "be verified. Not pushing." >&2
+    exit 1
+  fi
   STILL_MISSING=0
-  for c in $(git rev-list "$BASE_REF..HEAD"); do
+  for c in $POST_REV; do
     git log -1 --format='%B' "$c" \
       | grep -qi '^[[:space:]]*co-authored-by:.*holden@pigscanfly\.ca' || STILL_MISSING=1
   done

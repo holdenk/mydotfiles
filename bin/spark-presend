@@ -121,21 +121,40 @@ def detect_base(root, requested):
     if not Path(BASE_HELPER).exists():
         die(f"{BASE_HELPER} is missing, so the base cannot be resolved the same "
             "way the rebase resolves it; pass --base explicitly")
-    rb = subprocess.run([BASE_HELPER, "--print-base"], cwd=root,
-                        capture_output=True, text=True)
-    if rb.returncode == 2:
-        # Its systematic code: auth, network, a remote it cannot read. Guessing
-        # master here is how a backport gets checked against the wrong branch.
-        say("could not resolve the base (rebase_update.sh --print-base exited 2):")
-        for line in rb.stderr.strip().splitlines()[-5:]:
-            say(f"  {line}")
-        die("pass --base explicitly")
+    # REBASE_UPDATE_REMOTE pinned: the helper resolves against it, we test
+    # upstream/<base> below, and a stray REMOTE in the environment (squash-magic
+    # defaults it to origin, update-bases to apache-github) would make the two
+    # disagree -- the very thing delegating is meant to rule out.
+    # timeout: the helper fetches and calls gh, neither of which is bounded, and
+    # this is the pre-push gate. The inline code this replaced used timeout=20.
+    env = dict(os.environ, REBASE_UPDATE_REMOTE="upstream")
+    try:
+        rb = subprocess.run([BASE_HELPER, "--print-base"], cwd=root, env=env,
+                            capture_output=True, text=True, timeout=90)
+    except subprocess.TimeoutExpired:
+        die(f"{Path(BASE_HELPER).name} --print-base timed out (it fetches and "
+            "calls gh); pass --base explicitly")
+
+    def _helper_stderr(stderr):
+        # It runs under `set -x`, so the tail of stderr is xtrace, not the
+        # reason. Drop the trace lines or the real message scrolls off.
+        return [ln for ln in stderr.strip().splitlines()
+                if ln.strip() and not ln.lstrip().startswith("+")][-5:]
+
     out = rb.stdout.strip().splitlines()
     if rb.returncode != 0 or not out or not out[-1].strip():
-        say(f"rebase_update.sh --print-base failed (rc={rb.returncode}):")
-        for line in rb.stderr.strip().splitlines()[-5:]:
+        say(f"could not resolve the base ({Path(BASE_HELPER).name} "
+            f"--print-base exited {rb.returncode}):")
+        for line in _helper_stderr(rb.stderr):
             say(f"  {line}")
+        # Guessing master is how a backport gets checked against the wrong branch.
         die("pass --base explicitly")
+    # Surface its warnings even on success: it says "no PR and no version in the
+    # branch name; falling back to master" on stderr and still exits 0, and a
+    # guessed master silently checks a backport against the wrong version numbers.
+    for line in _helper_stderr(rb.stderr):
+        if "falling back to master" in line or "gh lookup unavailable" in line:
+            say(f"base resolution: {line}")
     return out[-1].strip()
 
 

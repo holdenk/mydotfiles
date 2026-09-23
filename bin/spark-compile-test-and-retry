@@ -566,6 +566,24 @@ def is_nix_jdk(java_home):
         return False
 
 
+def any_system_jdk():
+    """A runnable system JDK for the fallback when set_spark_jdk_to_ok could not
+    answer. Applies no per-branch rule -- it only gets us off a nix JDK, which is
+    wrong on every branch -- so it prefers the feature version with the widest
+    acceptance: 17 is taken by master, 4.0, 4.1 AND 3.5, where 25 is master-only.
+    Then 21, then whatever is newest."""
+    by_feature = {}
+    for d in sorted(Path("/usr/lib/jvm").glob("*")):
+        ver = jdk_version(d)
+        m = re.match(r"\d+", ver or "")
+        if m:
+            by_feature.setdefault(int(m.group()), str(d))
+    for feat in (17, 21):
+        if feat in by_feature:
+            return by_feature[feat]
+    return by_feature[max(by_feature)] if by_feature else None
+
+
 def resolve_jdk(root):
     """Pin JAVA_HOME to a JDK THIS worktree accepts, and keep it off nix.
 
@@ -606,8 +624,22 @@ def resolve_jdk(root):
         home = str(Path(found).resolve().parent.parent)
         os.environ["JAVA_HOME"] = home
     if is_nix_jdk(home):
-        say(f"WARNING: JAVA_HOME={home} is nix-provided; RocksDB/LevelDB suites "
-            "will fail to dlopen their native libs (UnsatisfiedLinkError)")
+        # Actually move off it, do not just warn. The helper declining (a
+        # branch-3.5 worktree on a 21/25-only box, say) must not leave the run on
+        # a nix JDK -- every RocksDB/LevelDB/state-store suite then dies with
+        # UnsatisfiedLinkError hours in, which is the thing this function exists
+        # to catch early.
+        alt = any_system_jdk()
+        if alt:
+            say(f"JAVA_HOME was nix-provided ({home}); using {alt} instead -- a "
+                "nix JDK cannot dlopen libstdc++ for RocksDB/LevelDB JNI. It may "
+                "not be one this branch accepts; check if the suites complain.")
+            home = alt
+            os.environ["JAVA_HOME"] = home
+        else:
+            say(f"WARNING: JAVA_HOME={home} is nix-provided and /usr/lib/jvm has "
+                "no usable JDK; RocksDB/LevelDB suites will fail to load their "
+                "native libs")
     return home, jdk_version(home) or "?"
 
 
