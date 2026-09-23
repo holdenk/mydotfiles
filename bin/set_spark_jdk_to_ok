@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+# set_spark_jdk_to_ok -- point JAVA_HOME at a JDK the CURRENT Spark worktree
+# actually accepts, and say which one it picked.
+#
+#   source ~/bin/set_spark_jdk_to_ok     # changes this shell -- the usual way
+#   eval "$(set_spark_jdk_to_ok)"        # same, from a script
+#   set_spark_jdk_to_ok                  # prints only, sets nothing
+#   source ~/bin/set_spark_jdk_to_ok -f  # re-pick even if the current one is legal
+#
+# Run plainly it cannot set anything -- a child process does not own its
+# parent's environment -- so it puts the export line on stdout and all the
+# narration on stderr, which is what makes the eval form work.
+#
+# Every constraint is read out of the worktree, because the branches disagree
+# and one box-wide default is wrong for half of them:
+#   master/4.x   docs say Java 17/21/25, pom java.minimum.version=17.0.11, and
+#                SparkBuild vetoes Java 25 below 25.0.3 (JDK-8377811).
+#   branch-3.5   docs say Java 8/11/17, and there is no java.minimum.version
+#                and no checkJavaVersion at all -- so "newest that clears the
+#                minimum" would hand it a 25 with nothing in the build to
+#                catch it. The docs line is the upper bound; the pom and
+#                SparkBuild are update floors underneath it.
+#
+# A JAVA_HOME this branch already accepts is left alone, so an override you set
+# on purpose survives -- same rule as resolve_jdk in spark-compile-test-and-retry.
+# That makes it sticky: a 17 picked for a 3.5 backport is still legal on master,
+# so master keeps it rather than going back to the preferred 21. Pass -f when you
+# want the preferred JDK for the branch regardless.
+#
+# A nix JDK is never chosen: its loader looks for a cache under its own prefix
+# instead of /etc/ld.so.cache, so rocksdbjni/leveldbjni cannot dlopen libstdc++
+# and every state-store suite dies with UnsatisfiedLinkError.
+#
+# Works sourced from bash or zsh, so: no `set -e`/`set -u` (they would leak into
+# the interactive shell), and nothing relies on unquoted word splitting, which
+# zsh does not do. Newline-delimited strings and `while read`, not arrays.
+
+_ssjo_say() { printf '%s\n' "$*" >&2; }
+
+_ssjo_usage() {
+  _ssjo_say "usage: source set_spark_jdk_to_ok [-f]   (or: eval \"\$(set_spark_jdk_to_ok)\")"
+  _ssjo_say "  -f, --force   re-pick even if the current JAVA_HOME is legal for this branch"
+  _ssjo_say "Picks a JDK the current Spark worktree accepts -- docs/index.md for the"
+  _ssjo_say "supported list, pom.xml java.minimum.version and SparkBuild's version veto"
+  _ssjo_say "for the floors -- prefers 21 then 17, and never a nix JDK (RocksDB JNI)."
+}
+
+# java.version for a JDK home, empty if it has no runnable java. -x, not -e: a
+# half-extracted or root-only JDK has a bin/java you cannot actually run.
+_ssjo_version() {
+  [ -n "${1:-}" ] && [ -x "$1/bin/java" ] || return 1
+  "$1/bin/java" -XshowSettings:properties -version 2>&1 \
+    | awk -F'= ' '/^ *java\.version =/{print $2; exit}'
+}
+
+# 1.8.0_392 -> 8, 17.0.16 -> 17, 25-ea -> 25. The legacy 1.x scheme only shows
+# up where a Java 8 is still legal, which is branch-3.5.
+_ssjo_feature() {
+  case "${1:-}" in
+    1.*) _ssjo_x=$(printf '%s' "$1" | cut -s -d. -f2) ;;
+    *)   _ssjo_x=${1%%.*} ;;
+  esac
+  _ssjo_x=${_ssjo_x%%[^0-9]*}
+  printf '%s' "$_ssjo_x"
+}
+
+# feature.interim.update[.patch] -- the same field Runtime.Version.update() gives
+# SparkBuild, so a missing component is 0. `cut -s` is the whole ballgame:
+# without it a dotless "25" comes back as update 25 and a Java 25 GA, which is
+# exactly what Spark vetoes, sails straight through. setup-shared's
+# check_jdk_for_spark carries the same -s for the same reason.
+_ssjo_update() {
+  case "${1:-}" in
+    1.*) printf '0'; return ;;
+  esac
+  _ssjo_u=$(printf '%s' "${1:-}" | cut -s -d. -f3)
+  _ssjo_u=${_ssjo_u%%[^0-9]*}
+  printf '%s' "${_ssjo_u:-0}"
+}
+
+_ssjo_is_nix() {
+  case "$(readlink -f "${1:-}/bin/java" 2>/dev/null)" in
+    (/nix/store/*) return 0 ;;
+  esac
+  return 1
+}
+
+# Acceptable for this worktree? Reads the _SSJO_* constraints set by _ssjo_main.
+_ssjo_ok() {
+  _ssjo_vf=$(_ssjo_feature "${1:-}"); _ssjo_vu=$(_ssjo_update "${1:-}")
+  [ -n "$_ssjo_vf" ] || return 1
+  # Empty list means docs/index.md had no such line; then there is no upper
+  # bound to apply and the floors below are all we have.
+  if [ -n "$_SSJO_FEATS" ]; then
+    printf '%s\n' "$_SSJO_FEATS" | grep -qx "$_ssjo_vf" || return 1
+  fi
+  # SparkBuild's isCompatible: feature above the floor, or equal with a new
+  # enough update. It does not compare the patch level, so neither do we.
+  if [ "$_ssjo_vf" -lt "$_SSJO_MIN_F" ]; then return 1; fi
+  if [ "$_ssjo_vf" -eq "$_SSJO_MIN_F" ] && [ "$_ssjo_vu" -lt "$_SSJO_MIN_U" ]; then return 1; fi
+  if [ -n "$_SSJO_RULE_F" ] && [ "$_ssjo_vf" -eq "$_SSJO_RULE_F" ] \
+     && [ "$_ssjo_vu" -lt "$_SSJO_RULE_U" ]; then return 1; fi
+  return 0
+}
+
+_ssjo_wants() {
+  printf 'branch wants Java %s' "$(printf '%s\n' "$_SSJO_FEATS" | tr '\n' '/' | sed 's#/$##')"
+  [ -n "$_SSJO_MIN" ] && printf ', minimum %s' "$_SSJO_MIN"
+  [ -n "$_SSJO_RULE_F" ] && printf ', and %s needs update %s' "$_SSJO_RULE_F" "$_SSJO_RULE_U"
+  printf '\n'
+}
+
+_ssjo_main() {
+  _ssjo_force=0
+  case "${1:-}" in
+    -h|--help) _ssjo_usage; return 0 ;;
+    -f|--force) _ssjo_force=1 ;;
+    "") ;;
+    *) _ssjo_say "unknown argument: $1"; _ssjo_usage; return 2 ;;
+  esac
+
+  _ssjo_root=$(git rev-parse --show-toplevel 2>/dev/null)
+  if [ -z "$_ssjo_root" ] \
+     || ! grep -q '<artifactId>spark-parent' "$_ssjo_root/pom.xml" 2>/dev/null; then
+    _ssjo_say "not in an apache/spark worktree (no pom.xml with spark-parent); nothing to pick for"
+    return 1
+  fi
+
+  # --- what this branch accepts -------------------------------------------
+  _SSJO_FEATS=""
+  while read -r _ssjo_f; do
+    [ -n "$_ssjo_f" ] || continue
+    _SSJO_FEATS="${_SSJO_FEATS:+$_SSJO_FEATS
+}$(_ssjo_feature "$_ssjo_f")"
+  done <<EOF
+$(sed -n 's/.*Spark runs on Java \([0-9/.]*\).*/\1/p' "$_ssjo_root/docs/index.md" 2>/dev/null \
+  | head -1 | tr '/' '\n')
+EOF
+  if [ -z "$_SSJO_FEATS" ]; then
+    _ssjo_say "WARNING: no 'Spark runs on Java ...' line in docs/index.md, so there is no"
+    _ssjo_say "  upper bound to enforce -- going on the pom floor alone. Check the pick."
+  fi
+
+  _SSJO_MIN=$(grep -o '<java.minimum.version>[^<]*' "$_ssjo_root/pom.xml" 2>/dev/null \
+              | head -1 | cut -d'>' -f2)
+  _SSJO_MIN_F=0; _SSJO_MIN_U=0
+  if [ -n "$_SSJO_MIN" ]; then
+    _SSJO_MIN_F=$(_ssjo_feature "$_SSJO_MIN"); _SSJO_MIN_U=$(_ssjo_update "$_SSJO_MIN")
+  fi
+
+  # The Java-25 veto, parsed out of SparkBuild rather than hardcoded, so a
+  # branch that does not carry it is not held to it (3.5 has no such check).
+  _SSJO_RULE_F=""; _SSJO_RULE_U=""
+  _ssjo_rule=$(sed -n \
+    's/.*currentVersionFeature == \([0-9]*\) && currentVersionUpdate < \([0-9]*\).*/\1 \2/p' \
+    "$_ssjo_root/project/SparkBuild.scala" 2>/dev/null | head -1)
+  if [ -n "$_ssjo_rule" ]; then
+    _SSJO_RULE_F=${_ssjo_rule% *}; _SSJO_RULE_U=${_ssjo_rule#* }
+  fi
+
+  # --- keep a deliberate JAVA_HOME this branch already accepts -------------
+  _ssjo_cur=${JAVA_HOME:-}
+  if [ "$_ssjo_force" = 0 ] && [ -n "$_ssjo_cur" ] && ! _ssjo_is_nix "$_ssjo_cur" \
+     && _ssjo_cur_v=$(_ssjo_version "$_ssjo_cur") && _ssjo_ok "$_ssjo_cur_v"; then
+    _ssjo_say "JAVA_HOME already ok for this branch: Java $_ssjo_cur_v at $_ssjo_cur"
+    printf 'export JAVA_HOME=%s\n' "$_ssjo_cur"
+    return 0
+  fi
+
+  # --- candidates, one "feature:version:home" record per line --------------
+  _ssjo_found=""; _ssjo_seen_vers=""
+  while read -r _ssjo_d; do
+    [ -n "$_ssjo_d" ] || continue
+    # macOS keeps the real home a level down; checking for it beats globbing
+    # */Contents/Home, which zsh treats as a fatal error when it matches nothing.
+    [ -x "$_ssjo_d/bin/java" ] || _ssjo_d="$_ssjo_d/Contents/Home"
+    [ -x "$_ssjo_d/bin/java" ] || continue
+    _ssjo_is_nix "$_ssjo_d" && continue
+    _ssjo_v=$(_ssjo_version "$_ssjo_d") || continue
+    [ -n "$_ssjo_v" ] || continue
+    _ssjo_seen_vers="${_ssjo_seen_vers}$_ssjo_v "
+    _ssjo_ok "$_ssjo_v" || continue
+    # First home wins per feature version; they are the same JDK to Spark.
+    printf '%s\n' "$_ssjo_found" | grep -q "^$(_ssjo_feature "$_ssjo_v"):" && continue
+    _ssjo_found="${_ssjo_found:+$_ssjo_found
+}$(_ssjo_feature "$_ssjo_v"):$_ssjo_v:$_ssjo_d"
+  done <<EOF
+$(for _ssjo_p in "${JVM_DIR:-/usr/lib/jvm}" "$HOME/.sdkman/candidates/java" \
+                 /Library/Java/JavaVirtualMachines; do
+    [ -d "$_ssjo_p" ] && find "$_ssjo_p" -maxdepth 1 -mindepth 1 2>/dev/null
+  done)
+EOF
+
+  if [ -z "$_ssjo_found" ]; then
+    _ssjo_say "no JDK this branch accepts under ${JVM_DIR:-/usr/lib/jvm} (or sdkman, or /Library/Java)."
+    _ssjo_say "  $(_ssjo_wants)"
+    _ssjo_say "  installed: ${_ssjo_seen_vers:-none found}"
+    return 1
+  fi
+
+  # 21 then 17 -- the workspace default and the 3.5 ceiling -- then the newest
+  # of whatever else this branch allows.
+  _ssjo_pick=""
+  for _ssjo_p in 21 17; do
+    if [ -z "$_ssjo_pick" ]; then
+      _ssjo_pick=$(printf '%s\n' "$_ssjo_found" | grep "^$_ssjo_p:" | head -1)
+    fi
+  done
+  if [ -z "$_ssjo_pick" ]; then
+    _ssjo_pick=$(printf '%s\n' "$_ssjo_found" | sort -t: -k1,1nr | head -1)
+  fi
+
+  _ssjo_pv=${_ssjo_pick#*:}; _ssjo_pv=${_ssjo_pv%%:*}
+  _ssjo_ph=${_ssjo_pick#*:}; _ssjo_ph=${_ssjo_ph#*:}
+  export JAVA_HOME="$_ssjo_ph"
+  _ssjo_say "JAVA_HOME -> $_ssjo_ph (Java $_ssjo_pv)"
+  _ssjo_say "  $(_ssjo_wants)"
+  if [ -n "$_ssjo_cur" ] && [ "$_ssjo_cur" != "$_ssjo_ph" ]; then
+    if _ssjo_is_nix "$_ssjo_cur"; then
+      _ssjo_say "  was: $_ssjo_cur (nix -- breaks RocksDB/LevelDB JNI)"
+    else
+      _ssjo_say "  was: $_ssjo_cur"
+    fi
+  fi
+  printf 'export JAVA_HOME=%s\n' "$_ssjo_ph"
+  return 0
+}
+
+# Sourced changes this shell, which is the point; executed it can only print.
+# Executing always lands in bash (the shebang), so zsh here means sourced.
+if [ -n "${ZSH_VERSION:-}" ]; then
+  _ssjo_main "$@"
+  return $?
+fi
+if [ "${BASH_SOURCE[0]:-$0}" != "$0" ]; then
+  _ssjo_main "$@"
+  return $?
+fi
+_ssjo_main "$@"
+exit $?
