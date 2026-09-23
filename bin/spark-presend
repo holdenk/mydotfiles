@@ -121,13 +121,16 @@ def detect_base(root, requested):
     if not Path(BASE_HELPER).exists():
         die(f"{BASE_HELPER} is missing, so the base cannot be resolved the same "
             "way the rebase resolves it; pass --base explicitly")
-    # REBASE_UPDATE_REMOTE pinned: the helper resolves against it, we test
-    # upstream/<base> below, and a stray REMOTE in the environment (squash-magic
-    # defaults it to origin, update-bases to apache-github) would make the two
-    # disagree -- the very thing delegating is meant to rule out.
+    # Both remotes pinned. REBASE_UPDATE_REMOTE because the helper resolves
+    # against it while we test upstream/<base> below, and FORK_REMOTE because the
+    # helper derives the GitHub owner from it and filters PRs on that login -- a
+    # stray FORK_REMOTE=apache-github makes the owner "apache", matches none of
+    # her PRs, and drops silently to the branch name and then to master. Both
+    # default differently in the sibling tools (squash-magic uses origin,
+    # update-bases apache-github), which is exactly how a stray value gets set.
     # timeout: the helper fetches and calls gh, neither of which is bounded, and
     # this is the pre-push gate. The inline code this replaced used timeout=20.
-    env = dict(os.environ, REBASE_UPDATE_REMOTE="upstream")
+    env = dict(os.environ, REBASE_UPDATE_REMOTE="upstream", FORK_REMOTE="origin")
     try:
         rb = subprocess.run([BASE_HELPER, "--print-base"], cwd=root, env=env,
                             capture_output=True, text=True, timeout=90)
@@ -136,10 +139,10 @@ def detect_base(root, requested):
             "calls gh); pass --base explicitly")
 
     def _helper_stderr(stderr):
-        # It runs under `set -x`, so the tail of stderr is xtrace, not the
-        # reason. Drop the trace lines or the real message scrolls off.
-        return [ln for ln in stderr.strip().splitlines()
-                if ln.strip() and not ln.lstrip().startswith("+")][-5:]
+        # No xtrace filtering: the helper disables `set -x` for --print-base
+        # precisely so this is real messages only, and filtering on a leading "+"
+        # would silently drop git/gh error text it passes through.
+        return [ln for ln in stderr.strip().splitlines() if ln.strip()][-5:]
 
     out = rb.stdout.strip().splitlines()
     if rb.returncode != 0 or not out or not out[-1].strip():
@@ -153,9 +156,20 @@ def detect_base(root, requested):
     # branch name; falling back to master" on stderr and still exits 0, and a
     # guessed master silently checks a backport against the wrong version numbers.
     for line in _helper_stderr(rb.stderr):
-        if "falling back to master" in line or "gh lookup unavailable" in line:
+        if ("falling back to master" in line or "gh lookup unavailable" in line
+                or line.startswith("NOTE:")):
             say(f"base resolution: {line}")
-    return out[-1].strip()
+    base = out[-1].strip()
+    # The helper accepts a LOCAL refs/heads/<base> as well as the remote one (it
+    # matches squash-magic there), so upstream/<base> is not guaranteed any more.
+    # Everything downstream -- base_version, the diff, the >500-file guard -- would
+    # then measure against a local branch that can be months stale, and print green.
+    if git(root, "rev-parse", "--verify", "--quiet",
+           f"refs/remotes/upstream/{base}", check=False).returncode != 0:
+        die(f"the base resolved to '{base}', but refs/remotes/upstream/{base} does "
+            f"not exist -- a local ref of that name may be stale. Fetch upstream, "
+            f"or pass --base explicitly.")
+    return base
 
 
 def base_version(root, base_ref):

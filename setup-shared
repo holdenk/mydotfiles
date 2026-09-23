@@ -11,6 +11,23 @@ set -x
 # BASH_SOURCE so this resolves the repo even when sourced from another cwd.
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
+# Warnings worth seeing at the END. This file is SOURCED, and setup-full then runs
+# apt-fast, conda, sbt and the pip deps under set -x -- minutes of output -- so a
+# warning printed where it happens scrolls away. The callers replay these last;
+# run directly, setup-shared replays them itself.
+SETUP_WARNINGS=""
+setup_warn() {
+  echo "WARNING: $*" >&2
+  SETUP_WARNINGS="${SETUP_WARNINGS}WARNING: $*
+"
+}
+setup_replay_warnings() {
+  [ -n "${SETUP_WARNINGS:-}" ] || return 0
+  echo >&2
+  echo "=== setup warnings ===" >&2
+  printf '%s' "$SETUP_WARNINGS" >&2
+}
+
 . /etc/os-release
 case " ${ID:-} ${ID_LIKE:-} " in
   *debian*|*ubuntu*)
@@ -223,11 +240,27 @@ if [ -n "$JDK_DEFAULT" ] || [ -n "$SPARK35_JDK" ]; then
     rc="$HOME/.$shellrc"
     [ -e "$rc" ] || command -v "${shellrc%rc}" >/dev/null 2>&1 || continue
     # Follow a symlinked rc so the rewrite and the append below touch one file.
-    rc_target="$(readlink -f "$rc" 2>/dev/null || printf '%s' "$rc")"
+    # python3, not readlink -f: BSD readlink has no -f before macOS 12.3, and
+    # falling back to $rc there would put us straight back to mv clobbering the
+    # symlink. python3 is installed above and already used for the hook check.
+    rc_target="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$rc")"
+    [ -n "$rc_target" ] || rc_target="$rc"
     # Rewrite an existing block rather than skipping it: a box first set up when
     # these pointed at another JDK would otherwise keep pointing at it forever.
     # awk, not `sed -i '/x/,+1d'`, which is GNU-only and we have Macs. The
     # separator blank in front goes too, or a re-run stacks another one.
+    # The temp has to sit next to the target for the rename to be atomic, and that
+    # directory is not necessarily writable (a symlink into a root-owned dotfiles
+    # checkout). Skip this rc with a warning rather than aborting: setup-shared is
+    # SOURCED, so a failure here would take setup-full's conda/sbt/pip with it.
+    rc_tmp="$rc_target.mydotfiles.tmp"
+    if ! (umask 077 && : >"$rc_tmp") 2>/dev/null; then
+      setup_warn "cannot write $rc_tmp, so $rc was left alone -- set JAVA_HOME"
+      setup_warn "  yourself, or make that directory writable and re-run."
+      rm -f "$rc_tmp" 2>/dev/null || true
+      continue
+    fi
+    cp -p "$rc_target" "$rc_tmp" 2>/dev/null || true
     if grep -qF "mydotfiles: JAVA_HOME" "$rc" 2>/dev/null; then
       # Delete only lines we recognise as ours, never a range. No scan for the
       # end marker: that has to look ahead, and a legacy block sitting above a
@@ -251,15 +284,19 @@ if [ -n "$JDK_DEFAULT" ] || [ -n "$SPARK35_JDK" ]; then
             }
             print l[i]
           }
-        }' "$rc" >"$rc_target.mydotfiles.tmp"
-      # mv onto the resolved TARGET, not onto $rc. mv straight onto $rc would
-      # replace a symlinked ~/.bashrc with a regular file and orphan whatever it
-      # pointed at; `cat >"$rc"` preserves the link but truncates first, so a
-      # Ctrl-C or ENOSPC mid-write leaves an empty shell config. Resolving the
-      # link keeps both properties, and the append below follows the link to the
-      # same file.
-      mv "$rc_target.mydotfiles.tmp" "$rc_target"
+        }' "$rc" >"$rc_tmp"
+      # mv onto the resolved TARGET, not onto $rc: mv straight onto $rc would
+      # replace a symlinked ~/.bashrc with a regular file and orphan what it
+      # pointed at, while `cat >"$rc"` keeps the link but truncates first, so a
+      # Ctrl-C or ENOSPC leaves an empty shell config. Resolving the link keeps
+      # both, and the append below follows the link to the same file.
+      # cp -p seeded the temp, so the mode and owner survive the rename -- a plain
+      # mv leaves the temp's umask mode and would widen a 0600 rc to 0644.
+      mv "$rc_tmp" "$rc_target"
     fi
+    # Gone already after a successful mv; this clears it when there was no block
+    # to rewrite, so the seeded temp does not linger next to the rc file.
+    rm -f "$rc_tmp" 2>/dev/null || true
     {
       printf '\n# mydotfiles: JAVA_HOME (setup-shared). Override per Spark branch as needed.\n'
       if [ -n "$JDK_DEFAULT" ]; then
@@ -346,6 +383,11 @@ for hook in block-rm-rf block-secrets inject-global-rules; do
   fi
 done
 if [ -n "$BAD_HOOKS" ]; then
-  echo "WARNING: broken cursor hook(s):$BAD_HOOKS -- the hooks are fail-closed," >&2
-  echo "  so Cursor tool calls will be blocked until these run and emit JSON." >&2
+  setup_warn "broken cursor hook(s):$BAD_HOOKS -- they are fail-closed, so Cursor"
+  setup_warn "  tool calls stay BLOCKED until these run and emit valid JSON."
+fi
+
+# Sourced, the callers replay these after provisioning; run directly, nobody else will.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  setup_replay_warnings
 fi

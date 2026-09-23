@@ -4,3 +4,5 @@
 # desktop setup (conda, sbt, OBS, mypackages, ...) is ./setup-full.
 set -euo pipefail
 source "$(dirname "$0")/setup-shared"
+
+setup_replay_warnings

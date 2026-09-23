@@ -566,18 +566,36 @@ def is_nix_jdk(java_home):
         return False
 
 
+def jdk_feature(ver):
+    """Feature version from a java.version string. 1.8.0_392 -> 8, 17.0.16 -> 17.
+    The legacy 1.N scheme matters: a naive leading-digit parse reads both Java 7
+    and Java 8 as feature 1 and collides them."""
+    m = re.match(r"1\.(\d+)", ver or "") or re.match(r"(\d+)", ver or "")
+    return int(m.group(1)) if m else None
+
+
 def any_system_jdk():
-    """A runnable system JDK for the fallback when set_spark_jdk_to_ok could not
-    answer. Applies no per-branch rule -- it only gets us off a nix JDK, which is
-    wrong on every branch -- so it prefers the feature version with the widest
-    acceptance: 17 is taken by master, 4.0, 4.1 AND 3.5, where 25 is master-only.
-    Then 21, then whatever is newest."""
+    """A runnable JDK for the fallback when set_spark_jdk_to_ok could not answer.
+    Applies no per-branch rule -- it only gets us off a nix JDK, which is wrong on
+    every branch -- so it prefers the feature version with the widest acceptance:
+    17 is taken by master, 4.0, 4.1 AND 3.5, where 25 is master-only. Then 21,
+    then the newest of whatever else. Never below 17: no Spark branch since 3.0
+    accepts one, so offering a Java 8 as the fix would be a lie.
+
+    Searches the same places set_spark_jdk_to_ok does, not just /usr/lib/jvm --
+    Path.glob on a missing directory returns [] in silence, so a Mac or an
+    sdkman-only box would otherwise find nothing and stay on the nix JDK."""
+    roots = [Path(os.environ.get("JVM_DIR") or "/usr/lib/jvm"),
+             Path.home() / ".sdkman" / "candidates" / "java",
+             Path("/Library/Java/JavaVirtualMachines")]
     by_feature = {}
-    for d in sorted(Path("/usr/lib/jvm").glob("*")):
-        ver = jdk_version(d)
-        m = re.match(r"\d+", ver or "")
-        if m:
-            by_feature.setdefault(int(m.group()), str(d))
+    for root in roots:
+        for d in sorted(root.glob("*")):
+            # macOS keeps the real home a level down.
+            home = d if (d / "bin" / "java").exists() else d / "Contents" / "Home"
+            feat = jdk_feature(jdk_version(home))
+            if feat is not None and feat >= 17:
+                by_feature.setdefault(feat, str(home))
     for feat in (17, 21):
         if feat in by_feature:
             return by_feature[feat]
@@ -612,6 +630,12 @@ def resolve_jdk(root):
         say(f"{Path(JDK_HELPER).name} could not pick a JDK for this branch:")
         for line in p.stderr.strip().splitlines()[-4:]:
             say(f"  {line}")
+        # Say it plainly. Without the helper there is no per-branch rule here, so
+        # whatever JAVA_HOME holds may well be one this branch rejects -- and the
+        # nix repoint below only covers nix, while setup-shared's default is a
+        # SYSTEM Java 21 that a branch-3.5 worktree refuses.
+        say("  so JAVA_HOME is unchecked against this branch; if the compile dies "
+            "in checkJavaVersion, that is why")
     else:
         say(f"{JDK_HELPER} is missing; not checking the JDK against this branch")
     # Fallback: no per-branch rule available, so only the thing that is true on

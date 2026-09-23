@@ -8,7 +8,22 @@ apt-get -y install git
 # dangling at the first tmpfiles cleanup, silently taking the commit-msg
 # co-author hook with it.
 cd ~
-[ -d mydotfiles ] || git clone https://github.com/holdenk/mydotfiles.git
-cd mydotfiles
+REPO_URL=https://github.com/holdenk/mydotfiles.git
+if [ -d mydotfiles/.git ]; then
+  # Fetch and fast-forward rather than skipping: a bare -d test happily
+  # provisions from a months-old commit, a feature branch, or a dirty tree, so
+  # re-running presetup to pick up new provisioning would re-apply the old.
+  cd mydotfiles
+  git remote get-url origin | grep -q 'holdenk/mydotfiles' \
+    || { echo "$HOME/mydotfiles points at a different repo; move it aside." >&2; exit 1; }
+  git fetch origin
+  git pull --ff-only || { echo "$HOME/mydotfiles will not fast-forward (dirty or diverged); fix it first." >&2; exit 1; }
+elif [ -e mydotfiles ]; then
+  echo "$HOME/mydotfiles exists but is not a git checkout; move it aside." >&2
+  exit 1
+else
+  git clone "$REPO_URL"
+  cd mydotfiles
+fi
 ./setup-full
 ./postsetup.sh

@@ -166,8 +166,13 @@ for branch in "$@"; do
   # nothing and fails, which the old -n test read as "not on the fork yet" -- so
   # a network blip skipped the divergence check and said something untrue.
   if ! FORK_LS="$(git ls-remote --heads "$FORK_REMOTE" "refs/heads/$branch")"; then
+    # Systematic, not per-branch: every branch hits an unreachable fork, and
+    # rebase_update.sh classifies the same condition as exit 2. Reporting N
+    # individual failures would defeat the stop-the-batch contract in the header.
+    echo "cannot reach $FORK_REMOTE (network or auth); every branch will hit" >&2
+    echo "this, so stopping the batch." >&2
     FAILED+=("$branch (cannot reach $FORK_REMOTE)")
-    continue
+    break
   fi
   if [ -n "$FORK_LS" ]; then
     if ! git pull --ff-only "$FORK_REMOTE" "$branch"; then

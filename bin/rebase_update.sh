@@ -140,16 +140,14 @@ detect_base_from_name() {
       *) break ;;
     esac
   done
-  # An explicit "branch-N.M" anywhere is unambiguous (it cannot be read out of
-  # ivy2.5.3), so accept it even mid-name -- my-fix-branch-3.5-backport is a real
-  # naming pattern and the anchored form alone sent it to master.
-  if [[ "$name" =~ (^|-)branch-([0-9]+(\.[0-9]+|\.x)+|[0-9]+x) ]]; then
-    suffix="${BASH_REMATCH[2]}"
-  elif [[ "$name" =~ -(branch-)?(master|[0-9]+(\.[0-9]+|\.x)+|[0-9]+x)(-r[0-9]+)?$ ]]; then
-    suffix="${BASH_REMATCH[2]}"
-  else
-    return 1
-  fi
+  # Anchored only, matching squash-magic.sh's derive_base_from_suffix exactly.
+  # A mid-name rule was tried and reverted: squash-magic has none, so it broke the
+  # parity this comment promises; it inverted the documented precedence
+  # (port-branch-3.5-to-4.0 was cut from 4.0, not 3.5); and unanchored it also
+  # matched branch-3.5foo. A name like my-fix-branch-3.5-backport therefore
+  # resolves to master -- see the warning where that fallback happens.
+  [[ "$name" =~ -(branch-)?(master|[0-9]+(\.[0-9]+|\.x)+|[0-9]+x)(-r[0-9]+)?$ ]] \
+    || return 1
   [[ "$suffix" =~ ^([0-9]+)x$ ]] && suffix="${BASH_REMATCH[1]}.x"
   if [ "$suffix" = "master" ]; then c="master"; else c="branch-$suffix"; fi
   # Local ref first, then the remote -- squash-magic.sh checks refs/heads/<base>
@@ -207,6 +205,13 @@ if [ -z "$BASE" ]; then
   else
     BASE="master"
     echo "no PR and no version in the branch name; falling back to master." >&2
+    # The suffix grammar is anchored on purpose (parity with squash-magic), so a
+    # name that mentions a release branch somewhere in the middle lands here.
+    # That is exactly when master is likely wrong, so name it.
+    if [[ "$BRANCH" =~ branch-([0-9]+(\.[0-9]+|\.x)+|[0-9]+x) ]]; then
+      echo "NOTE: the name mentions branch-${BASH_REMATCH[1]}, but only a TRAILING" >&2
+      echo "  version counts. If that is the base, pass it: $0 branch-${BASH_REMATCH[1]}" >&2
+    fi
     echo "if this branch targets a release branch, pass it: $0 branch-4.0" >&2
   fi
 fi
@@ -283,8 +288,16 @@ fi
 # defences: don't call it when every commit already has the trailer (the
 # commit-msg hook usually got there first), and undo it if it over-reached.
 PRE_COAUTHOR="$(git rev-parse HEAD)"
+# Captured first, same as the POST_REV check below: a failing command substitution
+# is exempt from set -e, and an empty list here is worse than there -- it reads as
+# "every commit already has the trailer", which skips the rewrite, the re-check
+# AND the ancestry check, and force-pushes an unattributed branch.
+if ! PRE_REV="$(git rev-list "$BASE_REF..HEAD")"; then
+  echo "cannot list $BASE_REF..HEAD, so the trailer cannot be checked. Stopping." >&2
+  exit 1
+fi
 MISSING_TRAILER=0
-for c in $(git rev-list "$BASE_REF..HEAD"); do
+for c in $PRE_REV; do
   git log -1 --format='%B' "$c" | grep -qi '^[[:space:]]*co-authored-by:.*holden@pigscanfly\.ca' \
     || MISSING_TRAILER=1
 done

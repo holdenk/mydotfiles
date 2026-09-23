@@ -173,3 +173,8 @@ if [ -z "${SERVER:-}" ]; then
   sudo apt update
   sudo apt install -y obs-studio
 fi
+
+# Last, and with the trace off, so setup-shared's warnings are not buried under
+# everything above.
+set +x
+setup_replay_warnings
