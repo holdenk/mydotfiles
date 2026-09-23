@@ -30,7 +30,7 @@ case " ${ID:-} ${ID_LIKE:-} " in
       PKG_UPDATE="sudo yum makecache"
       PKG_INSTALL="sudo yum install -y"
     fi
-    EMACS_PKG=emacs-nw
+    EMACS_PKG=emacs-nox
     LIBSTDCXX_PKG=libstdc++
     ;;
   *)
@@ -50,14 +50,21 @@ git config --global init.templateDir "$REPO/git-templates"
 
 # Docker: wanted on headless dev boxes too, not just desktops.
 if [ "$FAMILY" = debian ]; then
+  # Docker publishes ubuntu and debian separately, and plain Debian's codename
+  # (bookworm) does not exist in the ubuntu repo -- picking the wrong one fails
+  # at the next apt update, not here.
+  case " ${ID:-} ${ID_LIKE:-} " in
+    (*ubuntu*) DOCKER_DISTRO=ubuntu ;;
+    (*)        DOCKER_DISTRO=debian ;;
+  esac
   $PKG_INSTALL apt-transport-https ca-certificates curl gnupg
   sudo install -m 0755 -d /etc/apt/keyrings
-  sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  sudo curl -fsSL "https://download.docker.com/linux/$DOCKER_DISTRO/gpg" -o /etc/apt/keyrings/docker.asc
   sudo chmod a+r /etc/apt/keyrings/docker.asc
 
   sudo tee /etc/apt/sources.list.d/docker.sources <<EOF
 Types: deb
-URIs: https://download.docker.com/linux/ubuntu
+URIs: https://download.docker.com/linux/$DOCKER_DISTRO
 Suites: $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
 Components: stable
 Signed-By: /etc/apt/keyrings/docker.asc
@@ -82,22 +89,51 @@ ln -sfn "$REPO/ai-bullshit/cursor-hooks.json" ~/.cursor/hooks.json
 ln -sfn "$REPO/ai-bullshit/claude/CLAUDE.md" ~/.claude/CLAUDE.md
 ln -sfn "$REPO/ai-bullshit/claude/rules" ~/.claude/rules
 
-# Java: default JAVA_HOME to the system Temurin 21 JDK when the box has one. A
+# Java: default JAVA_HOME to a system Java 21 JDK when the box has one. A
 # default, not a constraint -- the agent files say to check per branch.
 #   21, not 25: branch-4.0 and branch-4.1 take 17/21 only and 25 is
-#   master-only. (branch-3.5 is 8/11/17, so a 3.5 backport overrides to 17.)
+#   master-only. (branch-3.5 is 8/11/17, hence SPARK35_JAVA_HOME below.)
 #   A system JDK, not the nix one, for the JNI reason spelled out below.
 # Only JAVA_HOME: leaving PATH alone means an existing nix/sdkman `java` keeps
 # winning there, so `java -version` and $JAVA_HOME can disagree (which is why
 # the agent note says to check both).
-JDK_DEFAULT=/usr/lib/jvm/temurin-21-jdk
 JDK_BUG_URL=https://bugs.openjdk.org/browse/JDK-8377811
+JVM_DIR=${JVM_DIR:-/usr/lib/jvm}
+# What the box hands every process before we touch anything. Worth keeping: the
+# rc lines below only reach interactive shells, so this is still what an agent
+# or a script inherits.
+JAVA_HOME_INHERITED=${JAVA_HOME:-}
+
+is_nix_jdk() {
+  [ -n "${1:-}" ] || return 1
+  case "$(readlink -f "$1/bin/java" 2>/dev/null)" in
+    (/nix/store/*) return 0 ;;
+  esac
+  return 1
+}
 
 jdk_version() {
   # The java.version property, so we get 25.0.3 and not a whole banner line.
   [ -x "$1/bin/java" ] || return 1
   "$1/bin/java" -XshowSettings:properties -version 2>&1 \
     | awk -F'= ' '/^ *java\.version =/{print $2; exit}'
+}
+
+# The directory names differ by distro: temurin-21-jdk on the Red Hat side,
+# temurin-21-jdk-arm64 (or -amd64) from Adoptium's apt repo, java-21-openjdk-*
+# for Debian's own build. Glob wide and confirm with java.version rather than
+# trusting the name.
+find_jdk() {
+  local feature="$1" d ver
+  for d in "$JVM_DIR/temurin-$feature-jdk"* "$JVM_DIR"/*temurin*"$feature"* \
+           "$JVM_DIR/java-$feature-openjdk"* "$JVM_DIR"/*"$feature"*; do
+    [ -x "$d/bin/java" ] || continue
+    ver=$(jdk_version "$d") || continue
+    [ "${ver%%.*}" = "$feature" ] || continue
+    printf '%s\n' "$d"
+    return 0
+  done
+  return 1
 }
 
 check_jdk_for_spark() {
@@ -140,33 +176,72 @@ check_jdk_for_spark() {
   fi
 }
 
-if [ -d "$JDK_DEFAULT" ]; then
+JDK_DEFAULT=$(find_jdk 21 || true)
+# branch-3.5 tops out at Java 17. Nothing picks SPARK35_JAVA_HOME up on its own
+# -- it is here so a 3.5 backport can say JAVA_HOME=$SPARK35_JAVA_HOME instead
+# of going JDK hunting.
+SPARK35_JDK=$(find_jdk 17 || true)
+
+if [ -n "$JDK_DEFAULT" ]; then
   check_jdk_for_spark "$JDK_DEFAULT" "$JDK_DEFAULT"
   export JAVA_HOME="$JDK_DEFAULT"
-  # Append to an rc that exists, or to one whose shell is installed. Marked, so
-  # re-running setup does not stack duplicates (the conda lines in setup-full do
-  # stack -- do not copy that).
+else
+  echo "no Java 21 JDK under $JVM_DIR; leaving JAVA_HOME=${JAVA_HOME:-unset} alone" >&2
+  # Nothing of ours to set, so vet whatever the box already points at.
+  [ -n "${JAVA_HOME:-}" ] && check_jdk_for_spark "$JAVA_HOME" "inherited JAVA_HOME"
+fi
+if [ -n "$SPARK35_JDK" ]; then
+  check_jdk_for_spark "$SPARK35_JDK" "SPARK35_JAVA_HOME"
+  export SPARK35_JAVA_HOME="$SPARK35_JDK"
+else
+  echo "no Java 17 JDK under $JVM_DIR; SPARK35_JAVA_HOME unset" >&2
+fi
+
+# Append to an rc that exists, or to one whose shell is installed. Marked, so
+# re-running setup does not stack duplicates (the conda lines in setup-full do
+# stack -- do not copy that). The block is delimited by both markers, not by a
+# blank line: setup-full appends the conda lines straight after it with nothing
+# between, and a delete-to-the-next-blank would take them with it.
+if [ -n "$JDK_DEFAULT" ] || [ -n "$SPARK35_JDK" ]; then
   for shellrc in bashrc zshrc; do
     rc="$HOME/.$shellrc"
     [ -e "$rc" ] || command -v "${shellrc%rc}" >/dev/null 2>&1 || continue
     # Rewrite an existing block rather than skipping it: a box first set up when
-    # JDK_DEFAULT was another JDK would otherwise keep pointing at that one
-    # forever. awk, not `sed -i '/x/,+1d'`, which is GNU-only and we have Macs.
+    # these pointed at another JDK would otherwise keep pointing at it forever.
+    # awk, not `sed -i '/x/,+1d'`, which is GNU-only and we have Macs. The
+    # separator blank in front goes too, or a re-run stacks another one.
     if grep -qF "mydotfiles: JAVA_HOME" "$rc" 2>/dev/null; then
-      awk '/# mydotfiles: JAVA_HOME/ { skip = 2 }
-           skip { skip--; next }
-           { print }' "$rc" >"$rc.mydotfiles.tmp" && mv "$rc.mydotfiles.tmp" "$rc"
+      awk '{ l[NR] = $0 }
+           END {
+             for (i = 1; i <= NR; i++) {
+               if (l[i] == "" && l[i+1] ~ /# mydotfiles: JAVA_HOME/) continue
+               if (l[i] ~ /# mydotfiles: JAVA_HOME/) {
+                 # Bounded on purpose. A block we wrote closes with the end
+                 # marker; one written before that marker existed is the
+                 # marker plus its single export line.
+                 end = 0
+                 for (j = i + 1; j <= NR; j++)
+                   if (l[j] ~ /# mydotfiles: end JAVA_HOME/) { end = j; break }
+                 i = end ? end : i + 1
+                 continue
+               }
+               print l[i]
+             }
+           }' "$rc" >"$rc.mydotfiles.tmp"
+      mv "$rc.mydotfiles.tmp" "$rc"
     fi
-    cat >>"$rc" <<EOF
-
-# mydotfiles: JAVA_HOME (setup-shared). Override per Spark branch as needed.
-[ -d "$JDK_DEFAULT" ] && export JAVA_HOME="$JDK_DEFAULT"
-EOF
+    {
+      printf '\n# mydotfiles: JAVA_HOME (setup-shared). Override per Spark branch as needed.\n'
+      if [ -n "$JDK_DEFAULT" ]; then
+        printf '[ -d "%s" ] && export JAVA_HOME="%s"\n' "$JDK_DEFAULT" "$JDK_DEFAULT"
+      fi
+      if [ -n "$SPARK35_JDK" ]; then
+        printf '# Nothing reads SPARK35_JAVA_HOME on its own; it is the Java 17 for a 3.5 backport.\n'
+        printf '[ -d "%s" ] && export SPARK35_JAVA_HOME="%s"\n' "$SPARK35_JDK" "$SPARK35_JDK"
+      fi
+      printf '# mydotfiles: end JAVA_HOME\n'
+    } >>"$rc"
   done
-else
-  echo "no $JDK_DEFAULT; leaving JAVA_HOME=${JAVA_HOME:-unset} alone" >&2
-  # Nothing of ours to set, so vet whatever the box already points at.
-  [ -n "${JAVA_HOME:-}" ] && check_jdk_for_spark "$JAVA_HOME" "inherited JAVA_HOME"
 fi
 
 # RocksDB/LevelDB JNI needs libstdc++, and a nix JDK cannot find it. Its loader
@@ -181,14 +256,22 @@ fi
 # process and outranks each binary's RUNPATH, so nix binaries built against a
 # newer glibc resolve libc.so.6 from /lib64 and die -- `xargs` included:
 #   /lib64/libc.so.6: version `GLIBC_2.38' not found (required by xargs)
-case "$(readlink -f "${JAVA_HOME:-}/bin/java" 2>/dev/null)" in
-  /nix/store/*)
-    echo "WARNING: JAVA_HOME=$JAVA_HOME is nix-provided. Its loader ignores" >&2
-    echo "  /etc/ld.so.cache, so RocksDB/LevelDB JNI cannot dlopen libstdc++" >&2
-    echo "  and those suites fail with UnsatisfiedLinkError. Point JAVA_HOME at" >&2
-    echo "  a system JDK (/usr/lib/jvm/*) before building or testing Spark." >&2
-    ;;
-esac
+# The inherited value, not the one we just exported: ours is a system JDK by
+# construction, so checking it would never say anything.
+if is_nix_jdk "$JAVA_HOME_INHERITED"; then
+  echo "WARNING: this box hands out JAVA_HOME=$JAVA_HOME_INHERITED, which is" >&2
+  echo "  nix-provided (typically /etc/profile.d/java.sh). Its loader ignores" >&2
+  echo "  /etc/ld.so.cache, so RocksDB/LevelDB JNI cannot dlopen libstdc++ and" >&2
+  echo "  those suites fail with UnsatisfiedLinkError." >&2
+  if [ "${JAVA_HOME:-}" != "$JAVA_HOME_INHERITED" ]; then
+    echo "  The rc line above fixes interactive shells only. Anything that just" >&2
+    echo "  inherits an environment -- agents, cron, \`ssh <host> <cmd>\` -- still" >&2
+    echo "  gets the nix one, so set JAVA_HOME explicitly there." >&2
+  else
+    echo "  Point JAVA_HOME at a system JDK (/usr/lib/jvm/*) before building" >&2
+    echo "  or testing Spark." >&2
+  fi
+fi
 
 # franktheunicorn tools: clone and symlink everything in tools/ into ~/bin.
 # ~/bin is a symlink into this repo, so the tool names are listed in
