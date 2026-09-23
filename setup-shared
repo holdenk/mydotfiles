@@ -128,6 +128,10 @@ find_jdk() {
   for d in "$JVM_DIR/temurin-$feature-jdk"* "$JVM_DIR"/*temurin*"$feature"* \
            "$JVM_DIR/java-$feature-openjdk"* "$JVM_DIR"/*"$feature"*; do
     [ -x "$d/bin/java" ] || continue
+    # javac too, or a JRE gets written into both rc files as JAVA_HOME and every
+    # build/sbt dies with "Unable to locate a Java Compiler". Debian's
+    # openjdk-21-jre-headless alone creates such a tree under $JVM_DIR.
+    [ -x "$d/bin/javac" ] || continue
     ver=$(jdk_version "$d") || continue
     [ "${ver%%.*}" = "$feature" ] || continue
     printf '%s\n' "$d"
@@ -166,8 +170,16 @@ check_jdk_for_spark() {
     for d in /usr/lib/jvm/* ~/.sdkman/candidates/java/* /nix/store/*/bin/java; do
       if [ -e "$d" ]; then echo "  $d" >&2; fi
     done
-    echo "Upgrade that JDK or point JAVA_HOME at a supported one, then re-run." >&2
-    exit 1
+    echo "Upgrade that JDK or point JAVA_HOME at a supported one before" >&2
+    echo "building Spark. Continuing with the rest of setup." >&2
+    # return, not exit: setup-full:7 and setup-minimal-ws:6 SOURCE this file, so
+    # exit killed the parent -- leaving a box with gitconfig, docker's keyring
+    # and the agent symlinks written but no add_coauthor.sh (rebase_update.sh
+    # hard-requires it), no conda, no sbt, no pip deps. And this is a
+    # warning-class condition anyway: the 17.0.11 check right below is only a
+    # warning, on the grounds that the box is not necessarily for Spark, which
+    # applies identically here.
+    return 1
   fi
   # 17.0.11 is java.minimum.version in Spark master's pom.xml. A warning only:
   # this box is not necessarily for Spark.
@@ -183,7 +195,7 @@ JDK_DEFAULT=$(find_jdk 21 || true)
 SPARK35_JDK=$(find_jdk 17 || true)
 
 if [ -n "$JDK_DEFAULT" ]; then
-  check_jdk_for_spark "$JDK_DEFAULT" "default JAVA_HOME"
+  check_jdk_for_spark "$JDK_DEFAULT" "default JAVA_HOME" || true
   export JAVA_HOME="$JDK_DEFAULT"
 else
   echo "no Java 21 JDK under $JVM_DIR; leaving JAVA_HOME=${JAVA_HOME:-unset} alone" >&2
@@ -191,7 +203,7 @@ else
   [ -n "${JAVA_HOME:-}" ] && check_jdk_for_spark "$JAVA_HOME" "inherited JAVA_HOME"
 fi
 if [ -n "$SPARK35_JDK" ]; then
-  check_jdk_for_spark "$SPARK35_JDK" "SPARK35_JAVA_HOME"
+  check_jdk_for_spark "$SPARK35_JDK" "SPARK35_JAVA_HOME" || true
   export SPARK35_JAVA_HOME="$SPARK35_JDK"
 else
   echo "no Java 17 JDK under $JVM_DIR; SPARK35_JAVA_HOME unset" >&2

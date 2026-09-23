@@ -8,8 +8,8 @@ SLOTS=5
 POLL_SECS=5
 
 usage() {
-  echo "usage: with-test-lock [--slots N] -- command [args...]" >&2
-  echo "       with-test-lock --status" >&2
+  echo "usage: with-test-lock [--slots N] -- command [args...]   (N <= 5)" >&2
+  echo "       with-test-lock [--slots N] --status" >&2
   exit 2
 }
 
@@ -58,15 +58,30 @@ acquire() {
   return 1
 }
 
-if [[ "${1:-}" == "--status" ]]; then
-  status
-  exit 0
-fi
+# The shared protocol is 5 slots. Lowering your own ceiling is fine; raising it
+# is not -- acquire() creates slot-5, slot-6, ... on demand, and every other user
+# of this box (and --status) only ever probes 0-4, so those extra holders are
+# invisible to exactly the people the lock exists to coordinate with.
+MAX_SLOTS=5
+WANT_STATUS=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --status)
+      WANT_STATUS=1
+      shift
+      ;;
     --slots)
+      # Guarded: bare --slots died on set -u with "$2: unbound variable"
+      # instead of printing usage.
+      [[ $# -ge 2 ]] || usage
       SLOTS="$2"
+      [[ "$SLOTS" =~ ^[1-9][0-9]*$ ]] || usage
+      if (( SLOTS > MAX_SLOTS )); then
+        echo "with-test-lock: --slots $SLOTS exceeds the shared cap of $MAX_SLOTS;" >&2
+        echo "  extra slots are invisible to everyone else on this box." >&2
+        exit 2
+      fi
       shift 2
       ;;
     --)
@@ -81,6 +96,11 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "$WANT_STATUS" == 1 ]]; then
+  status
+  exit 0
+fi
 
 [[ $# -gt 0 ]] || usage
 

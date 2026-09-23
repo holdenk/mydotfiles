@@ -46,9 +46,11 @@ _ssjo_usage() {
 }
 
 # java.version for a JDK home, empty if it has no runnable java. -x, not -e: a
-# half-extracted or root-only JDK has a bin/java you cannot actually run.
+# half-extracted or root-only JDK has a bin/java you cannot actually run. javac
+# as well, or a JRE-only tree passes here and then fails every build/sbt with
+# "Unable to locate a Java Compiler".
 _ssjo_version() {
-  [ -n "${1:-}" ] && [ -x "$1/bin/java" ] || return 1
+  [ -n "${1:-}" ] && [ -x "$1/bin/java" ] && [ -x "$1/bin/javac" ] || return 1
   "$1/bin/java" -XshowSettings:properties -version 2>&1 \
     | awk -F'= ' '/^ *java\.version =/{print $2; exit}'
 }

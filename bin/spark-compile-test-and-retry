@@ -536,9 +536,12 @@ def parse_py_failures(logfile):
 def jdk_version(java_home):
     """java.version for a JDK directory, or None if it has no runnable java.
     os.access, not exists(): a root-owned or half-extracted JDK has a bin/java
-    that cannot be run, and system_jdk() probes every dir under /usr/lib/jvm."""
+    that cannot be run, and system_jdk() probes every dir under /usr/lib/jvm.
+    javac too: a JRE-only tree (Debian's openjdk-21-jre-headless creates one)
+    reports a fine java.version and then fails every build with "Unable to
+    locate a Java Compiler"."""
     java = Path(java_home) / "bin" / "java"
-    if not os.access(java, os.X_OK):
+    if not os.access(java, os.X_OK) or not os.access(Path(java_home) / "bin" / "javac", os.X_OK):
         return None
     try:
         p = subprocess.run([str(java), "-XshowSettings:properties", "-version"],
