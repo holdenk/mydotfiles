@@ -10,6 +10,11 @@ This box is shared. Builds and tests take a slot. At most ~5 concurrent
 holders; otherwise wait until a slot drops. Release when the command exits
 (including failure). `flock`, not mkdir -- a dead process drops the lock.
 
+Exception: `rebase_update.sh` in compile-only mode (its default, and
+what `rebase_update_batch.sh` uses) deliberately runs unslotted -- it
+runs no tests, so it does not queue behind the runs that do.
+`--full-test` takes a slot like everything else.
+
     bash ~/bin/with-test-lock -- <build-or-test-command>
     bash ~/bin/with-test-lock --status
 

@@ -3,7 +3,7 @@
 #
 # For each branch: switch to it, fast-forward to the fork's latest
 # (FORK_REMOTE/<branch>, default origin), then hand off to rebase_update.sh
-# (rebase onto the PR base, lint, build, force-push back).
+# (rebase onto the PR base, lint, clean build, force-push back).
 #
 # A branch that fails is logged and the batch moves on, rolled back to the
 # commit it started from so a half-done rebase+rewrite never masquerades as

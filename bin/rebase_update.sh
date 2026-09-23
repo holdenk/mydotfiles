@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # rebase_update.sh -- rebase the current Spark branch onto its PR's base
-# branch, re-add the co-author trailer, build-check, force-push TO THE FORK.
+# branch, re-add the co-author trailer, clean build-check, force-push TO THE
+# FORK.
 #
-# Both modes lint-scala when Scala/Java moved, then build under the test lock
-# (a Spark build wants a slot even with no tests running). The mode picks what
-# the build is and whether suites follow:
-#   --compile-only (default)  compile + test:compile, no suites.
-#   --full-test               package + test:compile, then
-#                             spark-compile-test-and-retry --fast
+# Both modes lint-scala when Scala/Java moved, then build. The mode picks what
+# the build is, whether suites follow, and whether any of it takes a
+# /tmp/test-lock slot:
+#   --compile-only (default)  clean compile + test:compile, no suites, NO
+#                             SLOT -- it runs no tests, so it does not queue
+#                             behind the runs that do.
+#   --full-test               clean package + test:compile under the lock,
+#                             then spark-compile-test-and-retry --fast
 #                             --skip-build --base <base> (the suites derived
 #                             from the base diff, failures retried
 #                             individually).
@@ -37,7 +40,8 @@ REMOTE="${REMOTE:-upstream}"
 FORK_REMOTE="${FORK_REMOTE:-origin}"
 # Siblings of this script (resolve through the ~/bin symlink), so moving the
 # mydotfiles checkout never stales these. LOCK_HELPER overrides the helper
-# used here; spark-compile-test-and-retry resolves its own and ignores it.
+# used here (--full-test only); spark-compile-test-and-retry resolves its own
+# and ignores it.
 # Split out: a failing readlink nested inside another $() is swallowed even
 # under set -e, leaving SCRIPT_DIR as the invocation cwd.
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
@@ -197,21 +201,29 @@ else
   fi
 fi
 
+# Only --full-test queues for a slot; compile-only stays out of the way.
+if [ "$FULL_TEST" = "1" ]; then
+  LOCK=(bash "$LOCK_HELPER" --)
+else
+  LOCK=()
+fi
+
 # Into a variable, not straight into a pipe: `git diff | grep -q` reports a
 # bad $BASE_REF as "no Scala changes" because grep's 1 hides git's 128.
 CHANGED="$(git diff --name-only "$BASE_REF" HEAD)"
 if grep -qE '\.(scala|java)$' <<<"$CHANGED"; then
-  bash "$LOCK_HELPER" -- ./dev/lint-scala
+  "${LOCK[@]}" ./dev/lint-scala
 else
   echo "no Scala/Java changes vs $BASE_REF; skipping lint-scala"
 fi
 
-# --full-test needs the jar, so build `package` here and hand
-# spark-compile-test-and-retry --skip-build rather than booting sbt twice.
-BUILD_TASKS=(compile test:compile)
-[ "$FULL_TEST" = "1" ] && BUILD_TASKS=(package test:compile)
-bash "$LOCK_HELPER" -- ./build/sbt -Phive "${BUILD_TASKS[@]}" || \
-  bash "$LOCK_HELPER" -- ./build/sbt -Phive clean "${BUILD_TASKS[@]}"
+# clean, always: a rebase rewrites files under zinc and its change detection
+# does not survive that, so an incremental pass here greens things it did not
+# actually recompile. --full-test needs the jar too, so build `package` and
+# hand spark-compile-test-and-retry --skip-build rather than booting sbt twice.
+BUILD_TASKS=(clean compile test:compile)
+[ "$FULL_TEST" = "1" ] && BUILD_TASKS=(clean package test:compile)
+"${LOCK[@]}" ./build/sbt -Phive "${BUILD_TASKS[@]}"
 
 if [ "$FULL_TEST" = "1" ]; then
   # Runs the suites derived from the $BASE_REF diff under the lock, retrying
