@@ -63,22 +63,35 @@ detect_base_from_pr() {
   command -v gh >/dev/null 2>&1 || return 1
   # No --author @me: it switches --head to prefix matching and a same-named
   # backport branch (foo-4.x-r2) wins over the exact match. Filter exactly.
-  local out owner
+  local out owner err rc
   # --head matches any fork's branch of that name, so filter on the owner of
-  # $FORK_REMOTE too -- otherwise a stranger's PR can hand us its base.
-  owner="$(git remote get-url "$FORK_REMOTE" \
+  # $FORK_REMOTE too -- otherwise a stranger's PR can hand us its base. An
+  # empty owner would match nobody and read as "no PR", so say so instead.
+  owner="$(git remote get-url "$FORK_REMOTE" 2>/dev/null \
              | sed -E 's#(.*[:/])([^/]+)/[^/]+(\.git)?$#\2#')"
+  if [ -z "$owner" ]; then
+    echo "cannot read the owner of remote '$FORK_REMOTE'; is it configured?" >&2
+    return 2
+  fi
   # Separate query failure from "no open PR": an auth/network error must not
-  # read as "this branch targets master" and rebase a backport onto it.
-  if ! out=$(gh pr list --repo apache/spark --head "$BRANCH" --state open \
+  # read as "this branch targets master" and rebase a backport onto it. Return
+  # 2, never `exit`: this runs inside a command substitution, where exit kills
+  # only the subshell and the caller falls straight through to master.
+  # gh's stderr goes to its own file, not into $out -- it prints update notices
+  # on successful calls, and merged they become the "base branch".
+  err="$(mktemp)"
+  out=$(gh pr list --repo apache/spark --head "$BRANCH" --state open \
       --json baseRefName,headRefName,headRepositoryOwner \
       --jq '.[] | select(.headRefName=="'"$BRANCH"'")
-                | select(.headRepositoryOwner.login=="'"$owner"'") | .baseRefName' 2>&1); then
+                | select(.headRepositoryOwner.login=="'"$owner"'") | .baseRefName' 2>"$err") \
+    && rc=0 || rc=$?
+  if [ "$rc" != 0 ]; then
     echo "gh pr list failed, so the PR's base is unknown:" >&2
-    echo "$out" >&2
-    echo "pass the base explicitly, e.g. $0 branch-4.0" >&2
-    exit 1
+    cat "$err" >&2
+    rm -f "$err"
+    return 2
   fi
+  rm -f "$err"
   head -n 1 <<<"$out" | grep -v '^$' || return 1
 }
 
@@ -124,6 +137,11 @@ git fetch --quiet "$REMOTE" 2>/dev/null || true
 if [ -z "$BASE" ]; then
   if BASE=$(detect_base_from_pr); then
     :
+  elif [ "$?" = 2 ]; then
+    # Systematic (auth, network, misconfigured remote): every branch hits it, so
+    # exit 2 and let rebase_update_batch.sh stop rather than mangle the rest.
+    echo "pass the base explicitly, e.g. $0 branch-4.0" >&2
+    exit 2
   elif BASE=$(detect_base_from_name); then
     :
   else
