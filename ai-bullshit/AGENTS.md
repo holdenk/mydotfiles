@@ -56,6 +56,22 @@ When I ask you to defer something, write
 with what was deferred, why, where things stand, and what to do when
 resuming. Then tell me the path.
 
+## Check the Java version for the branch
+
+Branches differ on which JDKs they accept, so `$JAVA_HOME` matters. Check what
+the branch wants (`java.version` / `java.minimum.version` in `pom.xml`,
+`docs/index.md`; master is Java 17/21/25 and rejects Java 25 below 25.0.3),
+check what you are running (`java -version` AND `echo $JAVA_HOME` -- they
+disagree when nix or sdkman owns `PATH`, and sbt follows `JAVA_HOME`), then set
+`JAVA_HOME` to match and say which JDK you used when reporting a result.
+`project/SparkBuild.scala`'s `checkJavaVersion` fails the compile with the real
+reason, so this is loud, not mysterious.
+
+To see what the host already has: `ls -l /usr/lib/jvm`,
+`ls -l /etc/alternatives | grep -i java`, `ls -d ~/.sdkman/candidates/java/*`,
+`ls -d /nix/store/*/bin/java`. `setup-shared` defaults `JAVA_HOME` to
+`/usr/lib/jvm/temurin-25-jdk` when present -- a default, override per branch.
+
 ## Always fucking run tests
 
 Do not ask first. Wrap builds and tests in

@@ -317,6 +317,34 @@ Local `mypy` reports ~11 pre-existing errors in `pyspark/pandas/*` and
 `pyspark/sql/pandas/types.py` from pandas-stubs version drift. Confirm any
 error is in a file you touched before treating it as yours.
 
+## Check the Java version for the branch
+
+Spark branches do not agree on which JDKs they accept, and the box default is
+not automatically the right one. Before building or testing a branch:
+
+- **What the branch wants:** `java.version` and `java.minimum.version` in
+  `pom.xml`, plus `docs/index.md` (master today: "Spark runs on Java
+  17/21/25"). `project/SparkBuild.scala`'s `checkJavaVersion` runs before
+  every compile and throws with the real reason, so a wrong JDK fails loudly
+  rather than mysteriously -- master also rejects Java 25 below 25.0.3
+  (JDK-8377811).
+- **What you are actually running:** `java -version` AND `echo $JAVA_HOME`.
+  They disagree wherever nix or sdkman owns `PATH`, and sbt follows
+  `JAVA_HOME`, so the `java` on your `PATH` is not the one doing the build.
+- Set `JAVA_HOME` to a supported one, and say which JDK you used when
+  reporting a build or test result.
+
+What is already installed, in the places it hides:
+
+    ls -l /usr/lib/jvm                      # distro + temurin installs
+    ls -l /etc/alternatives | grep -i java  # what plain `java` points at
+    ls -d ~/.sdkman/candidates/java/*       # sdkman, if it is set up
+    ls -d /nix/store/*/bin/java             # nix-installed JDKs
+
+`setup-shared` defaults `JAVA_HOME` to `/usr/lib/jvm/temurin-25-jdk` when that
+exists. A default, not a constraint -- override it per branch, e.g.
+`JAVA_HOME=/usr/lib/jvm/temurin-17-jdk build/sbt -Phive package`.
+
 ## Apache Spark conventions worth remembering
 
 - **Do not tag commits/PRs as security.** CVEs are assigned separately and
