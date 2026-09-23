@@ -36,8 +36,20 @@
 
 set -ex
 
-REMOTE="${REMOTE:-upstream}"
+# REBASE_UPDATE_REMOTE first: squash-magic.sh and update-bases.sh read a bare
+# $REMOTE too and default it differently (origin, apache-github), so exporting
+# REMOTE to steer one of them silently repoints the others in the same shell.
+REMOTE="${REBASE_UPDATE_REMOTE:-${REMOTE:-upstream}}"
 FORK_REMOTE="${FORK_REMOTE:-origin}"
+
+# Collapse a child's failure to 1. Exit 2 is rebase_update_batch.sh's
+# "systematic, stop the whole batch" signal, so it has to mean THIS script
+# decided that -- and the children hand out 2 for branch-specific reasons
+# (spark-compile-test-and-retry's die() defaults to 2, and BUILD FAILED returns
+# 2), which would abandon every remaining branch over one bad base.
+run_step() {
+  "$@" || { echo "step failed (rc=$?): $*" >&2; exit 1; }
+}
 # Siblings of this script (resolve through the ~/bin symlink), so moving the
 # mydotfiles checkout never stales these. LOCK_HELPER overrides the helper
 # used here (--full-test only); spark-compile-test-and-retry resolves its own
@@ -69,8 +81,15 @@ detect_base_from_pr() {
   # empty owner would match nobody and read as "no PR", so say so instead.
   owner="$(git remote get-url "$FORK_REMOTE" 2>/dev/null \
              | sed -E 's#(.*[:/])([^/]+)/[^/]+(\.git)?$#\2#')"
-  if [ -z "$owner" ]; then
-    echo "cannot read the owner of remote '$FORK_REMOTE'; is it configured?" >&2
+  # sed prints non-matching input unchanged, so a URL this pattern does not fit
+  # (a trailing slash, or an insteadOf alias like hk:spark.git, which
+  # `git remote get-url` returns un-rewritten) yields a non-empty non-login
+  # that passes an emptiness test, matches no PR, and reads as "no open PR" --
+  # the silent master fallback the return 2 below exists to prevent. So check
+  # it actually looks like a GitHub login.
+  if ! [[ "$owner" =~ ^[A-Za-z0-9]([A-Za-z0-9]|-[A-Za-z0-9]){0,38}$ ]]; then
+    echo "cannot read a GitHub owner from remote '$FORK_REMOTE' (got '${owner:-}')." >&2
+    echo "pass the base explicitly, or fix the remote URL." >&2
     return 2
   fi
   # Separate query failure from "no open PR": an auth/network error must not
@@ -100,8 +119,20 @@ detect_base_from_name() {
   # two scripts never disagree about where a branch was cut from: the version
   # is ANCHORED at the end (an unanchored match reads ivy2.5.3 as 2.5), -Nx is
   # an alias for -N.x, and a trailing -rN is a redone cut, not a version.
-  local suffix c
-  [[ "$BRANCH" =~ -(branch-)?(master|[0-9]+(\.[0-9]+|\.x)+|[0-9]+x)(-r[0-9]+)?$ ]] \
+  local suffix c name="$BRANCH"
+  # Strip squash-magic's own output suffixes first, the way its logical_name()
+  # does -- it names its results ${branch}-aok and ${branch}-squashed, so
+  # foo-4.0-aok is exactly the branch that exists between a squash and a PR,
+  # i.e. when detect_base_from_pr cannot help either. Without this it fell
+  # through to master. Loop: -squashed-aok happens.
+  while :; do
+    case "$name" in
+      *-aok)      name="${name%-aok}" ;;
+      *-squashed) name="${name%-squashed}" ;;
+      *) break ;;
+    esac
+  done
+  [[ "$name" =~ -(branch-)?(master|[0-9]+(\.[0-9]+|\.x)+|[0-9]+x)(-r[0-9]+)?$ ]] \
     || return 1
   suffix="${BASH_REMATCH[2]}"
   [[ "$suffix" =~ ^([0-9]+)x$ ]] && suffix="${BASH_REMATCH[1]}.x"
@@ -113,6 +144,7 @@ detect_base_from_name() {
 PRINT_ONLY=0
 FULL_TEST=0
 BASE=""
+BASE_EXPLICIT=0
 while [ $# -ge 1 ]; do
   case "$1" in
     --print-base)   PRINT_ONLY=1 ;;
@@ -126,7 +158,7 @@ while [ $# -ge 1 ]; do
         echo "unexpected extra argument: $1" >&2
         exit 2
       fi
-      BASE="$1" ;;
+      BASE="$1"; BASE_EXPLICIT=1 ;;
   esac
   shift
 done
@@ -163,7 +195,12 @@ fi
 # base is wrong" guard. MAX_REPLAY=0 disables.
 MAX_REPLAY="${MAX_REPLAY:-40}"
 REPLAY="$(git rev-list --count "$BASE_REF..HEAD")"
-if [ "$MAX_REPLAY" != "0" ] && [ "$REPLAY" -gt "$MAX_REPLAY" ]; then
+# Not when the base was typed on the command line: this guard exists to catch bad
+# DETECTION, and spark-compile-test-and-retry's 500-changed-files guard is gated
+# on `not args.base` for exactly that reason. Telling someone who just passed a
+# base to "pass the base explicitly" is not advice.
+if [ "$BASE_EXPLICIT" = "0" ] && [ "$MAX_REPLAY" != "0" ] \
+   && [ "$REPLAY" -gt "$MAX_REPLAY" ]; then
   echo "$REPLAY commits would replay onto $BASE_REF -- that base is almost" >&2
   echo "certainly wrong (release branch rebased onto master?). Pass the base" >&2
   echo "explicitly, or re-run with MAX_REPLAY=0 if it really is that long." >&2
@@ -174,7 +211,20 @@ fi
 # -- so check containment here, before anything is rewritten.
 git fetch --quiet "$FORK_REMOTE" "$BRANCH" 2>/dev/null || true
 START_HEAD="$(git rev-parse HEAD)"
-FORK_TIP="$(git rev-parse --verify --quiet "refs/remotes/$FORK_REMOTE/$BRANCH" || true)"
+# ls-remote, not the tracking ref: `git fetch <remote> <branch>` only writes
+# refs/remotes/<remote>/<branch> when the remote's fetch refspec covers it, so a
+# branch that really is on the fork can leave the tracking ref absent. That empty
+# value then (a) skipped the divergence check below, dropping the "pushed from
+# another machine" protection, and (b) made the pinned lease "$BRANCH:", which git
+# reads as "must not already exist" -- a guaranteed stale-info rejection, after a
+# full clean build.
+if FORK_LS="$(git ls-remote --heads "$FORK_REMOTE" "refs/heads/$BRANCH")"; then
+  FORK_TIP="$(awk 'NR==1{print $1}' <<<"$FORK_LS")"
+else
+  echo "cannot reach $FORK_REMOTE to read refs/heads/$BRANCH, so the push lease" >&2
+  echo "cannot be pinned safely. Network or auth -- every branch hits it." >&2
+  exit 2
+fi
 if [ -n "$FORK_TIP" ] && ! git merge-base --is-ancestor "$FORK_TIP" "$START_HEAD"; then
   echo "$FORK_REMOTE/$BRANCH is at $FORK_TIP, which this branch does not" >&2
   echo "contain -- pushed from another machine? Reconcile first; a" >&2
@@ -209,12 +259,30 @@ if [ "$MISSING_TRAILER" = "0" ]; then
   echo "every commit in $BASE_REF..HEAD already has the trailer; skipping $COAUTHOR"
 else
   "$COAUTHOR"
+  # Re-check: the two disagree on what "already has it" means. This guard wants
+  # her address; add_coauthor.sh:20 skips on any `Co-authored-by:` at all, as
+  # case-sensitive bytes. So a commit carrying the canonical lowercase trailer
+  # for somebody else -- a cherry-pick, a GitHub squash-merge trailer -- sets
+  # MISSING_TRAILER=1, then gets skipped, and the only check after it is the
+  # ancestry one below, which passes. Branch pushed without her trailer, silently.
+  STILL_MISSING=0
+  for c in $(git rev-list "$BASE_REF..HEAD"); do
+    git log -1 --format='%B' "$c" \
+      | grep -qi '^[[:space:]]*co-authored-by:.*holden@pigscanfly\.ca' || STILL_MISSING=1
+  done
+  if [ "$STILL_MISSING" = "1" ]; then
+    echo "$COAUTHOR ran but commits in $BASE_REF..HEAD still lack her trailer:" >&2
+    echo "it skips any message that already has some other Co-authored-by line." >&2
+    echo "Add hers by hand, then re-run. Not pushing an unattributed branch." >&2
+    exit 1
+  fi
   if ! git merge-base --is-ancestor "$BASE_REF" HEAD; then
     echo "co-author rewrite reached past $BASE_REF and rewrote upstream" >&2
     echo "commits; resetting to $PRE_COAUTHOR and stopping." >&2
     git reset --hard "$PRE_COAUTHOR"
-    echo "bound the rewrite (add_coauthor.sh --refs $BASE_REF..HEAD) or add" >&2
-    echo "the trailer by hand, then re-run." >&2
+    echo "add_coauthor.sh takes no arguments -- it picks its own range -- so" >&2
+    echo "add the trailer to $BASE_REF..HEAD by hand (or teach it a --refs" >&2
+    echo "flag), then re-run." >&2
     exit 1
   fi
 fi
@@ -230,7 +298,7 @@ fi
 # bad $BASE_REF as "no Scala changes" because grep's 1 hides git's 128.
 CHANGED="$(git diff --name-only "$BASE_REF" HEAD)"
 if grep -qE '\.(scala|java)$' <<<"$CHANGED"; then
-  "${LOCK[@]}" ./dev/lint-scala
+  run_step "${LOCK[@]}" ./dev/lint-scala
 else
   echo "no Scala/Java changes vs $BASE_REF; skipping lint-scala"
 fi
@@ -241,13 +309,13 @@ fi
 # hand spark-compile-test-and-retry --skip-build rather than booting sbt twice.
 BUILD_TASKS=(clean compile test:compile)
 [ "$FULL_TEST" = "1" ] && BUILD_TASKS=(clean package test:compile)
-"${LOCK[@]}" ./build/sbt -Phive "${BUILD_TASKS[@]}"
+run_step "${LOCK[@]}" ./build/sbt -Phive "${BUILD_TASKS[@]}"
 
 if [ "$FULL_TEST" = "1" ]; then
   # Runs the suites derived from the $BASE_REF diff under the lock, retrying
   # each failure individually. The full suite is spark-presend's job. It's a
   # Python script: invoke directly, not via bash.
-  "$SCRIPT_DIR/spark-compile-test-and-retry" --fast --skip-build --base "$BASE_REF"
+  run_step "$SCRIPT_DIR/spark-compile-test-and-retry" --fast --skip-build --base "$BASE_REF"
 fi
 
 # Pinned, not bare: worktrees share refs, so another tree's fetch can refresh
