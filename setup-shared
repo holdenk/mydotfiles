@@ -82,13 +82,15 @@ ln -sfn "$REPO/ai-bullshit/cursor-hooks.json" ~/.cursor/hooks.json
 ln -sfn "$REPO/ai-bullshit/claude/CLAUDE.md" ~/.claude/CLAUDE.md
 ln -sfn "$REPO/ai-bullshit/claude/rules" ~/.claude/rules
 
-# Java: default JAVA_HOME to the Temurin 25 JDK when the box has one. A
-# default, not a constraint -- Spark branches differ on which JDKs they accept,
-# and the agent files say to check per branch and override. Only JAVA_HOME:
-# leaving PATH alone means an existing nix/sdkman `java` keeps winning there,
-# so `java -version` and $JAVA_HOME can disagree (which is why the agent note
-# says to check both).
-JDK_DEFAULT=/usr/lib/jvm/temurin-25-jdk
+# Java: default JAVA_HOME to the system Temurin 21 JDK when the box has one. A
+# default, not a constraint -- the agent files say to check per branch.
+#   21, not 25: branch-4.0 and branch-4.1 take 17/21 only and 25 is
+#   master-only. (branch-3.5 is 8/11/17, so a 3.5 backport overrides to 17.)
+#   A system JDK, not the nix one, for the JNI reason spelled out below.
+# Only JAVA_HOME: leaving PATH alone means an existing nix/sdkman `java` keeps
+# winning there, so `java -version` and $JAVA_HOME can disagree (which is why
+# the agent note says to check both).
+JDK_DEFAULT=/usr/lib/jvm/temurin-21-jdk
 JDK_BUG_URL=https://bugs.openjdk.org/browse/JDK-8377811
 
 jdk_version() {
@@ -141,19 +143,25 @@ check_jdk_for_spark() {
 if [ -d "$JDK_DEFAULT" ]; then
   check_jdk_for_spark "$JDK_DEFAULT" "$JDK_DEFAULT"
   export JAVA_HOME="$JDK_DEFAULT"
-  # Append to an rc that exists, or to one whose shell is installed. Guarded by
-  # a marker so re-running setup does not stack duplicates (the conda lines in
-  # setup-full do stack -- do not copy that).
+  # Append to an rc that exists, or to one whose shell is installed. Marked, so
+  # re-running setup does not stack duplicates (the conda lines in setup-full do
+  # stack -- do not copy that).
   for shellrc in bashrc zshrc; do
     rc="$HOME/.$shellrc"
     [ -e "$rc" ] || command -v "${shellrc%rc}" >/dev/null 2>&1 || continue
-    if ! grep -qF "mydotfiles: JAVA_HOME" "$rc" 2>/dev/null; then
-      cat >>"$rc" <<EOF
+    # Rewrite an existing block rather than skipping it: a box first set up when
+    # JDK_DEFAULT was another JDK would otherwise keep pointing at that one
+    # forever. awk, not `sed -i '/x/,+1d'`, which is GNU-only and we have Macs.
+    if grep -qF "mydotfiles: JAVA_HOME" "$rc" 2>/dev/null; then
+      awk '/# mydotfiles: JAVA_HOME/ { skip = 2 }
+           skip { skip--; next }
+           { print }' "$rc" >"$rc.mydotfiles.tmp" && mv "$rc.mydotfiles.tmp" "$rc"
+    fi
+    cat >>"$rc" <<EOF
 
 # mydotfiles: JAVA_HOME (setup-shared). Override per Spark branch as needed.
 [ -d "$JDK_DEFAULT" ] && export JAVA_HOME="$JDK_DEFAULT"
 EOF
-    fi
   done
 else
   echo "no $JDK_DEFAULT; leaving JAVA_HOME=${JAVA_HOME:-unset} alone" >&2

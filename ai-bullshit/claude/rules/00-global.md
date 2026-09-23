@@ -341,9 +341,21 @@ What is already installed, in the places it hides:
     ls -d ~/.sdkman/candidates/java/*       # sdkman, if it is set up
     ls -d /nix/store/*/bin/java             # nix-installed JDKs
 
-`setup-shared` defaults `JAVA_HOME` to `/usr/lib/jvm/temurin-25-jdk` when that
-exists. A default, not a constraint -- override it per branch, e.g.
-`JAVA_HOME=/usr/lib/jvm/temurin-17-jdk build/sbt -Phive package`.
+`setup-shared` defaults `JAVA_HOME` to `/usr/lib/jvm/temurin-21-jdk` when that
+exists -- 21 because 4.0/4.1 take 17/21 only and 25 is master-only. A default,
+not a constraint: override per branch, e.g.
+`JAVA_HOME=/usr/lib/jvm/temurin-17-jdk build/sbt -Phive package` for a 3.5
+backport.
+
+Use a **system** JDK from `/usr/lib/jvm`, not a nix one, for anything that
+touches RocksDB or LevelDB. A nix JDK's loader looks for its cache under its
+own prefix instead of `/etc/ld.so.cache`, finds none, and falls back to nix's
+glibc and libgcc -- neither has `libstdc++.so.6` -- so the native lib from
+rocksdbjni/leveldbjni cannot dlopen and the suite dies with
+`UnsatisfiedLinkError`. It reads like a missing package and isn't. Do not
+"fix" it with `LD_LIBRARY_PATH=/lib64`: that outranks every binary's RUNPATH
+process-wide, so nix binaries built against a newer glibc (`java`, `xargs`,
+`make`) then fail with `GLIBC_2.38 not found`.
 
 ## Apache Spark conventions worth remembering
 

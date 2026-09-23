@@ -19,7 +19,14 @@ is Java 17/21/25 and rejects Java 25 below 25.0.3), check what you run
 JDK you used. What the host has: `ls -l /usr/lib/jvm`,
 `ls -l /etc/alternatives | grep -i java`, `ls -d ~/.sdkman/candidates/java/*`,
 `ls -d /nix/store/*/bin/java`. `setup-shared` defaults it to
-`/usr/lib/jvm/temurin-25-jdk` when present; override per branch.
+`/usr/lib/jvm/temurin-21-jdk` when present (4.0/4.1 take 17/21 only, 25 is
+master-only); override per branch.
+
+For RocksDB/LevelDB suites use a **system** JDK from `/usr/lib/jvm`, not a nix
+one: a nix JDK's loader never reads `/etc/ld.so.cache`, so rocksdbjni's native
+lib cannot dlopen `libstdc++.so.6` -- `UnsatisfiedLinkError` that looks like a
+missing package. `LD_LIBRARY_PATH=/lib64` is not the fix; it breaks nix
+binaries with `GLIBC_2.38 not found`.
 
 Cursor Shell defaults to a 30s block. Spark builds and full test suites exceed
 that by a lot. Set `block_until_ms` high, or background the job (`0`) and read

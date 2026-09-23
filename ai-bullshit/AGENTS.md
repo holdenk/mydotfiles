@@ -70,7 +70,15 @@ reason, so this is loud, not mysterious.
 To see what the host already has: `ls -l /usr/lib/jvm`,
 `ls -l /etc/alternatives | grep -i java`, `ls -d ~/.sdkman/candidates/java/*`,
 `ls -d /nix/store/*/bin/java`. `setup-shared` defaults `JAVA_HOME` to
-`/usr/lib/jvm/temurin-25-jdk` when present -- a default, override per branch.
+`/usr/lib/jvm/temurin-21-jdk` when present (4.0/4.1 take 17/21 only, 25 is
+master-only) -- a default, override per branch.
+
+Use a **system** JDK from `/usr/lib/jvm`, never a nix one, for RocksDB/LevelDB
+suites: a nix JDK's loader never reads `/etc/ld.so.cache`, so the native lib
+from rocksdbjni cannot dlopen `libstdc++.so.6` and you get an
+`UnsatisfiedLinkError` that looks like a missing package.
+`LD_LIBRARY_PATH=/lib64` is not the fix -- it breaks nix binaries
+(`GLIBC_2.38 not found`).
 
 ## Always fucking run tests
 
