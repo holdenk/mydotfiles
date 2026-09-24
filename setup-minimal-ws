@@ -5,4 +5,7 @@
 set -euo pipefail
 source "$(dirname "$0")/setup-shared"
 
+# Trace off first, same as setup-full: the point of the replay is that the
+# warnings are the last thing on the screen, not more xtrace clutter.
+set +x
 setup_replay_warnings

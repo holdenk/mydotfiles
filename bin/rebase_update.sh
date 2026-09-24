@@ -148,6 +148,7 @@ detect_base_from_name() {
   # resolves to master -- see the warning where that fallback happens.
   [[ "$name" =~ -(branch-)?(master|[0-9]+(\.[0-9]+|\.x)+|[0-9]+x)(-r[0-9]+)?$ ]] \
     || return 1
+  suffix="${BASH_REMATCH[2]}"
   [[ "$suffix" =~ ^([0-9]+)x$ ]] && suffix="${BASH_REMATCH[1]}.x"
   if [ "$suffix" = "master" ]; then c="master"; else c="branch-$suffix"; fi
   # Local ref first, then the remote -- squash-magic.sh checks refs/heads/<base>
