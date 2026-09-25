@@ -494,14 +494,14 @@ class LintRunner:
         self.env.update({"SPARK_LOCAL_IP": "127.0.0.1",
                          "SPARK_LOCAL_HOSTNAME": "localhost"})
 
-    def run(self, name, cmd, timeout_min=60):
+    def run(self, name, cmd, timeout_min=60, cwd=None):
         logfile = self.logdir / f"lint-{name}.log"
         full = ["bash", LOCK_HELPER, "--"] + cmd \
             if os.path.exists(LOCK_HELPER) else cmd
         say(f"+ {' '.join(cmd)}   [log: {logfile}]")
         with open(logfile, "a") as lf:
             lf.write(f"$ {' '.join(cmd)}\n")
-            p = subprocess.Popen(full, cwd=self.root, env=self.env,
+            p = subprocess.Popen(full, cwd=cwd or self.root, env=self.env,
                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                  text=True, start_new_session=True)
             try:
@@ -527,56 +527,82 @@ def lint_phase(root, logdir, files, changed_py, skip_lint):
     """Run the repo's own linters for the languages the diff touches, plus
     RAT (dev/check-license), which CI runs on every PR."""
     touched = {Path(f).suffix for f in files}
-    jobs = [("license", ["./dev/check-license"])]
+    # Jobs are (name, cmd, cwd-subdir). cwd-subdir is relative to root, None
+    # means root. structured_logging_style.py on pre-master branches globs
+    # ../**/*.scala relative to the process cwd, so from the repo root it
+    # scans every sibling checkout next to the worktree; run it from dev/ to
+    # keep the scan inside this worktree. (master's version anchors the glob
+    # at __file__ instead, which matches zero files -- vacuous either way.)
+    jobs = [("license", ["./dev/check-license"], None)]
     if ".scala" in touched:
-        jobs.append(("scala", ["./dev/lint-scala"]))
+        jobs.append(("scala", ["./dev/lint-scala"], None))
         if (Path(root) / "dev" / "structured_logging_style.py").exists():
             jobs.append(("structured-logging",
-                         ["python3", "./dev/structured_logging_style.py"]))
+                         ["python3", "structured_logging_style.py"], "dev"))
     if ".java" in touched:
-        jobs.append(("java", ["./dev/lint-java"]))
+        jobs.append(("java", ["./dev/lint-java"], None))
     if ".py" in touched or any(f.startswith("python/") for f in files):
-        jobs.append(("python", ["./dev/lint-python"]))
+        jobs.append(("python", ["./dev/lint-python"], None))
     if ".R" in touched or ".r" in touched:
         if shutil.which("Rscript"):
-            jobs.append(("r", ["./dev/lint-r"]))
+            jobs.append(("r", ["./dev/lint-r"], None))
         else:
             say("lint: R files touched but Rscript not on PATH; skipping lint-r")
     if ".js" in touched:
         if shutil.which("node"):
-            jobs.append(("js", ["./dev/lint-js"]))
+            jobs.append(("js", ["./dev/lint-js"], None))
         else:
             say("lint: JS files touched but node not on PATH; skipping lint-js")
     if skip_lint:
-        say(f"lint: SKIPPED (--skip-lint); would run: {[n for n, _ in jobs]}")
+        say(f"lint: SKIPPED (--skip-lint); would run: {[n for n, _, _ in jobs]}")
         return True
+
+    # In a git worktree, .git is a regular file (the gitdir pointer), and
+    # RAT's built-in .git exclusion only matches directories, so
+    # dev/check-license flags the pointer file as header-less. Exclude it for
+    # the duration of the lint phase, then put the file back byte-for-byte.
+    excludes = Path(root) / "dev" / ".rat-excludes"
+    original_excludes = None
+    if (Path(root) / ".git").is_file() and excludes.is_file():
+        original_excludes = excludes.read_bytes()
+        with open(excludes, "ab") as ef:
+            ef.write(b".git\n")
 
     runner = LintRunner(root, logdir)
     ok = True
-    for name, cmd in jobs:
-        rc, logfile = runner.run(name, cmd)
-        if rc == 0:
-            say(f"lint-{name}: OK")
-            continue
-        if name == "python":
-            # lint-python is fail-fast per stage (compile -> custom-errors ->
-            # ruff -> mypy), so mypy errors in the log mean the earlier stages
-            # passed. Local mypy has ~11 pre-existing pandas-stubs drift
-            # errors; only fail when an error lands in a file this diff touched.
-            errs = re.findall(r"^(\S+\.py):\d+: error:",
-                              Path(logfile).read_text(errors="replace"),
-                              flags=re.M)
-            # mypy is invoked on python/... from the repo root, so paths in
-            # the log are repo-relative; the endswith covers either layout.
-            mine = [e for e in errs
-                    if any(c == e or c.endswith("/" + e) for c in changed_py)]
-            if errs and not mine:
-                report("warn", f"lint-python failed but all {len(errs)} mypy "
-                               "errors are in files this diff does not touch "
-                               "(known pandas-stubs drift); not blocking")
+    try:
+        for name, cmd, jobcwd in jobs:
+            rc, logfile = runner.run(name, cmd,
+                                     cwd=str(Path(root) / jobcwd) if jobcwd else None)
+            if rc == 0:
+                say(f"lint-{name}: OK")
                 continue
-        report("error", f"lint-{name} FAILED (rc={rc}); see {logfile}")
-        ok = False
+            if name == "python":
+                # lint-python is fail-fast per stage (compile -> custom-errors ->
+                # ruff -> mypy), so mypy errors in the log mean the earlier
+                # stages passed. Local mypy has ~11 pre-existing pandas-stubs
+                # drift errors; only fail when an error lands in a file this
+                # diff touched.
+                errs = re.findall(r"^(\S+\.py):\d+: error:",
+                                  Path(logfile).read_text(errors="replace"),
+                                  flags=re.M)
+                # mypy is invoked on python/... from the repo root, so paths
+                # in the log are repo-relative; the endswith covers either
+                # layout.
+                mine = [e for e in errs
+                        if any(c == e or c.endswith("/" + e)
+                               for c in changed_py)]
+                if errs and not mine:
+                    report("warn", f"lint-python failed but all {len(errs)} "
+                                   "mypy errors are in files this diff does "
+                                   "not touch (known pandas-stubs drift); "
+                                   "not blocking")
+                    continue
+            report("error", f"lint-{name} FAILED (rc={rc}); see {logfile}")
+            ok = False
+    finally:
+        if original_excludes is not None:
+            excludes.write_bytes(original_excludes)
     return ok
 
 

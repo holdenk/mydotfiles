@@ -90,7 +90,14 @@ EOF
   $PKG_UPDATE
   $PKG_INSTALL docker-ce docker-ce-cli containerd.io
 else
-  $PKG_INSTALL docker
+  # On the rh family the distro "docker" package is podman-docker (EL9,
+  # amzn2023), which dnf refuses to install over a docker-ce already present
+  # from Docker's own repo. Any docker on PATH is good enough -- skip.
+  if command -v docker >/dev/null 2>&1; then
+    echo "docker already installed, skipping distro docker package"
+  else
+    $PKG_INSTALL docker
+  fi
   sudo systemctl enable --now docker || true
 fi
 sudo usermod -aG docker "$USER"
@@ -355,11 +362,35 @@ for tool in "$FRANK_DIR"/tools/*; do
   ln -sfn "$tool" ~/bin/"$(basename "$tool")"
 done
 
-# add_coauthor.sh rewrites commit messages with git filter-repo.
-if ! command -v git-filter-repo >/dev/null 2>&1; then
-  $PKG_INSTALL git-filter-repo || python3 -m pip install --user git-filter-repo || \
-    echo "WARNING: git-filter-repo not installed; add_coauthor.sh needs it" >&2
+# add_coauthor.sh runs `git filter-repo`, so the thing to test is the
+# subcommand, not whether a package is installed. Those two come apart on the
+# rh family: the rpm drops the executable in /usr/libexec/git-core only, which
+# is a git exec-path dir and not a PATH dir, and the `git` here is nix-provided
+# with its exec-path under /nix/store. So the install succeeds, the binary is
+# on neither path, and the old `command -v` guard stopped at the successful
+# install and reported a green box where add_coauthor.sh could not run.
+filter_repo_works() { git filter-repo --version >/dev/null 2>&1; }
+if ! filter_repo_works; then
+  $PKG_INSTALL git-filter-repo || python3 -m pip install --user git-filter-repo || true
 fi
+if ! filter_repo_works; then
+  # Where the installers leave it when it isn't on PATH: the rh rpm's git
+  # exec-path dir, debian's equivalent, and ~/.local/bin from the pip fallback.
+  # No point checking $(git --exec-path) -- git searches that itself, so a hit
+  # there means the check above already passed.
+  # Link into /usr/local/bin, not ~/bin: a bare non-interactive shell (agent,
+  # cron, `ssh <host> <cmd>`) gets PATH=/usr/local/bin:/usr/bin and never sees
+  # the rc's ~/bin, and git resolves an unknown subcommand through PATH.
+  # `|| true` because this file is SOURCED -- see check_jdk_for_spark: a failing
+  # sudo here must warn below, not abort setup-full before conda and sbt.
+  for d in /usr/libexec/git-core /usr/lib/git-core ~/.local/bin; do
+    [ -x "$d/git-filter-repo" ] || continue
+    sudo ln -sfn "$d/git-filter-repo" /usr/local/bin/git-filter-repo || true
+    break
+  done
+fi
+filter_repo_works || \
+  setup_warn "git filter-repo does not run; add_coauthor.sh needs it"
 
 # The cursor hooks are fail-closed: if the scripts are missing or not
 # executable, every tool call is blocked. Git keeps the exec bit, but a

@@ -227,10 +227,32 @@ squash later.
 
 Ask before any external operation (push, PR, GitHub comment).
 
-## Co-author trailer on her own branches
+## Open every PR as a draft
 
-Commits in Spark worktrees get the
-`Co-authored-by: Holden Karau <holden@pigscanfly.ca>` trailer automagically
+`gh pr create --draft`, every new PR, every repo. Ready-for-review is a state
+she moves it to (`gh pr ready`) once CI has had a look; it is not the state you
+open it in. This does not loosen the gate above -- still ask first.
+
+## Co-author trailers: both addresses, on every commit
+
+Every commit message you write ends with both of these, in every repo -- not
+just Spark:
+
+    Co-authored-by: Holden Karau <holden@pigscanfly.ca>
+    Co-authored-by: Holden Karau <holden.karau@snowflake.com>
+
+Write them yourself; do not wait for the hook. The hook covers exactly one of
+the two addresses and only in a Spark worktree, so leaning on it silently drops
+the snowflake address everywhere and both of them in every other repo. Writing
+a trailer the hook then also sees is harmless -- `add_coauthor.py` skips an
+address that is already there.
+
+`add_coauthor.sh` takes no arguments and ignores the ones you pass, so there is
+no safe `--help`: running it anywhere runs `git filter-repo --force` on THAT
+repo, rewrites the branch and hard-resets, which silently discards uncommitted
+work. Only run it from the worktree whose branch you mean to rewrite.
+
+In Spark worktrees the `holden@pigscanfly.ca` one arrives automagically
 via a commit-msg hook (dotfiles `git-templates/hooks/commit-msg`, gated on
 `project/SparkBuild.scala`, uses `add_coauthor.py`). New clones get it from
 `init.templateDir` (set by `setup-shared`); older worktrees opt in once with
