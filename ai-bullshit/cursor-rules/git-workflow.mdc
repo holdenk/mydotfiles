@@ -9,14 +9,16 @@ alwaysApply: true
 
 Run `~/bin/spark-presend` from the worktree root and wait for
 the result before any push to the fork. Static checks, lint, then
-`spark-compile-test-and-retry` for the tests -- ALL of them by default
-(days; background it), `--modules` or `--fast` only when told to hurry.
-Green (flakes noted) -> push. Red -> fix first, then re-run. Do not push on
-a red run. Details and flags are in `always-run-tests.mdc`.
+`spark-compile-test-and-retry` for the tests. Pick the speed yourself --
+`--fast` by default, `--modules` for more complex changes, full (no flag)
+only when super complex and Holden has not said she is in a rush; do not
+block on asking her (details in `always-run-tests.mdc`). Green (flakes
+noted) -> push. Red -> fix first, then re-run. Do not push on a red run.
 
 Same at task level: when you believe a Spark task is done and code changed,
-suggest a pre-flight run before declaring done -- except pure doc changes,
-which it no-ops on anyway.
+run a pre-flight `spark-presend` (speed per the policy) before declaring
+done -- do not just suggest it. Pure doc changes are exempt; it no-ops on a
+doc-only diff anyway.
 
 ## Merging master into a branch: rebuild, test, then push
 

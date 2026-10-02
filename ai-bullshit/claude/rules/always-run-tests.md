@@ -54,19 +54,38 @@ later failures easier to attribute), but a baseline green says nothing
 about your changes -- the after-run is still required.
 
 Three speeds, same flags in both scripts (suite specs excepted -- see below):
-default is ALL the tests (every
-SBT module's test phase plus every PySpark test module -- days),
-`--modules` is every suite in touched modules (hours), `--fast` is
-diff-derived suites only (when Holden said she is in a hurry). Explicit
+`--fast` is the diff-derived suites only, `--modules` is every suite in
+touched modules (hours), and the default (no flag) is ALL the tests (every
+SBT module's test phase plus every PySpark test module -- days). Explicit
 suite specs override the speed.
+
+**Choosing the speed -- make the call, do not ask.** Default to `--fast`.
+Step up to `--modules` when the change is more complex (cross-module, SQL
+core, streaming, anything that plausibly breaks neighbours). Run the full
+suite (no flag) only when the change is super complex AND Holden has not
+said she is in a rush. Do not block on prompting her to pick a speed; judge,
+proceed, and say which speed you chose and why.
+
+Machine busyness shapes the plan:
+
+- **Not busy** (no other PRs in flight, test slots free -- check
+  `~/bin/with-test-lock --status` and `gh pr list --author @me --state
+  open`): run `spark-presend --fast`, push, open the draft PR, then run a
+  full `spark-presend` in the background and fix any follow-on failures it
+  surfaces. The fast gate gets the branch up; the full run catches the rest
+  without blocking the opening.
+- **Busy** (multiple PRs in flight or slots contended): `--fast` or
+  `--modules` alone -- do not pile a days-long full run onto a contended
+  box. Note that a full run is still owed and say so.
 
 It is long. Run it in the background and read the log; do not sit in a
 foreground shell hitting the timeout.
 
 - **Before pushing a Spark branch: run `spark-presend`.** Not optional.
-- **When you think a Spark task is done and code changed: suggest running
-  it** before declaring done. Pure doc changes (`docs/`, `*.md`, `*.rst`)
-  are exempt -- the scripts no-op on a doc-only diff.
+- **When you think a Spark task is done and code changed: run it** (speed
+  per the policy above) before declaring done -- do not just suggest it.
+  Pure doc changes (`docs/`, `*.md`, `*.rst`) are exempt -- the scripts
+  no-op on a doc-only diff.
 - `--skip-build` only when the jar is known current (you just built it).
   `--dry-run` prints the plan. `--base <ref>` for release branches.
 - **Explicit suites go to the test engine, not the gate.** `spark-presend` takes

@@ -107,11 +107,20 @@ with `RUN_HYPOTHESIS_MAX_EXAMPLES=200` locally. Details in
 Pre-send before pushing a Spark branch:
 `~/bin/spark-presend` from the worktree root (background it,
 it is long). Static checks, lint, then `spark-compile-test-and-retry` for
-tests -- ALL of them by default (days); `--modules` (hours) or `--fast`
-only when told to hurry. Exit non-zero = fix before pushing. Also suggest
-a run whenever a Spark task looks done and code changed; pure doc changes
-are exempt (it no-ops on doc-only diffs). `--dry-run` runs static checks
-only, `--skip-build` when the jar is current, `--base <ref>` for release
+tests. Pick the speed yourself -- `--fast` by default, `--modules` for more
+complex changes, full (no flag) only when super complex and Holden has not
+said she is in a rush. Do not block on asking her; judge, proceed, and say
+which speed you chose. On a non-busy box (no other PRs in flight, test slots
+free -- check `~/bin/with-test-lock --status` and
+`gh pr list --author @me --state open`) it is reasonable to `spark-presend
+--fast`, push, open the draft PR, then run a full `spark-presend` in the
+background and fix any follow-on failures. On a busy box (multiple PRs in
+flight or slots contended), `--fast` or `--modules` alone -- do not pile a
+days-long full run on a contended box; note a full run is still owed. Exit
+non-zero = fix before pushing. Run it (do not just suggest it) whenever a
+Spark task looks done and code changed; pure doc changes are exempt (it
+no-ops on doc-only diffs). `--dry-run` runs static checks only,
+`--skip-build` when the jar is current, `--base <ref>` for release
 branches. Timing: the run that counts is the one AFTER your changes; a
 baseline run at the start to see what's already broken is fine but never
 substitutes.
