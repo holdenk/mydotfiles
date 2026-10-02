@@ -46,8 +46,10 @@ import re
 import resource
 import shutil
 import signal
+import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -828,6 +830,33 @@ def env_checks(root, venv_py, need_py):
         die(f"/tmp is noexec or broken ({e}); RocksDB native loading will fail")
     finally:
         probe.unlink(missing_ok=True)
+    # InetAddress.getLocalHost() must return a usable address: whatever calls
+    # it (SparkHadoopUtil when AWS_* are set, some suites directly) dies with
+    # UnknownHostException on a host whose name resolves only to link-local
+    # IPv6. The runner env unsets the AWS trigger, so warn rather than die.
+    # getent is not a faithful probe (nss-myhostname hands it the link-local
+    # answer Java's resolver rejects), so ask Java itself.
+    geth_dir = Path(tempfile.mkdtemp(prefix="ctar-geth-"))
+    try:
+        geth = geth_dir / "Geth.java"
+        geth.write_text(
+            "public class Geth { public static void main(String[] a) "
+            "throws Exception { java.net.InetAddress h = "
+            "java.net.InetAddress.getLocalHost(); "
+            "if (h.isLinkLocalAddress()) System.exit(2); "
+            "System.out.println(h); } }\n")
+        r = subprocess.run([str(Path(java_home) / "bin" / "java"), str(geth)],
+                           capture_output=True, text=True, timeout=120)
+        if r.returncode != 0:
+            say(f"WARNING: InetAddress.getLocalHost() is unusable here "
+                f"(rc={r.returncode}: threw, or returned a link-local "
+                f"address); anything calling it breaks (S3 creds in the env, "
+                f"some suites). Fix: '127.0.1.1 {socket.gethostname()}' in "
+                f"/etc/hosts (setup-shared does this).")
+    except (OSError, subprocess.TimeoutExpired) as e:
+        say(f"WARNING: getLocalHost probe could not run: {e}")
+    finally:
+        shutil.rmtree(geth_dir, ignore_errors=True)
     free_gb = shutil.disk_usage(root).free / (1 << 30)
     if free_gb < 15:
         say(f"WARNING: only {free_gb:.0f}G free on the worktree filesystem; "

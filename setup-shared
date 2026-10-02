@@ -351,6 +351,76 @@ if is_nix_jdk "$JAVA_HOME_INHERITED"; then
   fi
 fi
 
+# Spark-on-a-cloud-VM host sanity, same spirit as the libstdc++ note: probe
+# here, warn early. spark-compile-test-and-retry re-checks all of this at run
+# time; this pass fixes what it can and flags the rest.
+
+# 1. The box's own hostname must give Java's InetAddress.getLocalHost() a
+#    usable address. Cloud images with generated names often lack one:
+#    /etc/hosts has no entry and nss-myhostname offers only link-local IPv6,
+#    which Java rejects with UnknownHostException -- and Spark's
+#    appendS3CredentialsFromEnvironment calls it whenever AWS_* are in the
+#    environment, killing the PySpark gateway. getent cannot probe this
+#    faithfully (it happily reports the link-local answer Java rejects), so
+#    ask Java itself; with no JDK at all, skip -- nothing here runs Spark yet.
+geth_probe() {
+  # $1: a java binary. rc 0 iff getLocalHost() returns a usable address.
+  local d rc
+  d=$(mktemp -d) || return 0
+  cat > "$d/Geth.java" <<'EOF'
+public class Geth {
+    public static void main(String[] a) throws Exception {
+        java.net.InetAddress h = java.net.InetAddress.getLocalHost();
+        if (h.isLinkLocalAddress()) System.exit(2);
+        System.out.println(h);
+    }
+}
+EOF
+  "$1" "$d/Geth.java" >/dev/null 2>&1
+  rc=$?
+  rm -rf "$d"
+  return $rc
+}
+
+JAVA_FOR_PROBE="${JAVA_HOME:-}/bin/java"
+[ -x "$JAVA_FOR_PROBE" ] || JAVA_FOR_PROBE=$(command -v java || true)
+# A nix java answers the host question wrong: its glibc cannot load the
+# system NSS modules, so getLocalHost throws even on a healthy box.
+if [ -n "$JAVA_FOR_PROBE" ] && is_nix_jdk "${JAVA_FOR_PROBE%/bin/java}"; then
+  JAVA_FOR_PROBE=""
+fi
+if [ -n "$JAVA_FOR_PROBE" ] && ! geth_probe "$JAVA_FOR_PROBE"; then
+  # The Debian cloud-image fix: map the name onto loopback. files beats
+  # myhostname in nsswitch, and a loopback answer is fine for Spark.
+  if grep -qF "127.0.1.1 $(hostname)" /etc/hosts 2>/dev/null; then
+    setup_warn "127.0.1.1 $(hostname) is already in /etc/hosts yet Java's getLocalHost still fails; look harder."
+  elif echo "127.0.1.1 $(hostname)" | sudo tee -a /etc/hosts >/dev/null; then
+    geth_probe "$JAVA_FOR_PROBE" || \
+      setup_warn "added 127.0.1.1 $(hostname) to /etc/hosts but Java's InetAddress.getLocalHost() still fails"
+  else
+    setup_warn "this host's name does not resolve for Java and /etc/hosts could not be updated;"
+    setup_warn "  Spark's S3-creds path will die with UnknownHostException. Add '127.0.1.1 $(hostname)' to /etc/hosts."
+  fi
+fi
+
+# 2. RocksDB JNI extracts its .so into java.io.tmpdir and execs it, so a
+#    noexec /tmp is a hard fail at test time.
+probe=/tmp/.setup-shared-exec-check
+if printf '#!/bin/sh\nexit 0\n' > "$probe" && chmod +x "$probe" && "$probe" 2>/dev/null; then
+  :
+else
+  setup_warn "/tmp failed an exec probe (noexec?); RocksDB/LevelDB JNI will fail to load."
+  setup_warn "  Remount /tmp exec or point java.io.tmpdir elsewhere."
+fi
+rm -f "$probe"
+
+# 3. State-store suites open thousands of files. The test engine raises soft
+#    nofile toward hard at run time, so warn only when even the hard cap is low.
+if [ "$(ulimit -Hn)" -lt 65536 ] 2>/dev/null; then
+  setup_warn "nofile hard limit is $(ulimit -Hn); state-store suites want >= 65536"
+  setup_warn "  (the test engine bumps soft toward hard; it cannot exceed it)."
+fi
+
 # franktheunicorn tools: clone and symlink everything in tools/ into ~/bin.
 # ~/bin is a symlink into this repo, so the tool names are listed in
 # .gitignore -- add new ones there when tools/ grows them.

@@ -43,6 +43,21 @@ only then hand me a command, with the reason.
 Direct. One sentence for the non-obvious choice. Be less lazy than her.
 When simplifying, keep the jokes and the tickets for what we did not do.
 
+You are too fucking verbose. Comments most of all: if the comment is
+longer than the code it explains, the code is wrong or the comment is.
+Cut.
+
+## Two review passes, twice
+
+On the first commit, and again right before a PR goes up, review the diff
+twice:
+
+1. **Simplification pass** -- same behavior, less code.
+2. **Is this really fucking needed at all?** -- every helper, flag, and
+   branch earns its diff or gets deleted.
+
+When in doubt, get an operator.
+
 ## Never put workspace-local hacks in a repo's AGENTS.md / CLAUDE.md
 
 Machine-specific setup belongs in `~/.cursor/rules/` or `~/.claude/CLAUDE.md`.
