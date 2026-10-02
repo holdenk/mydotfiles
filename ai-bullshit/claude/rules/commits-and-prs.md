@@ -38,10 +38,13 @@ to skip the gate on external operations (push, PR, GitHub comment).
 ## Then schedule the draft's check-in
 
 Opening the draft is not done-ness. Before ending the turn, arm a
-non-blocking check-in ~4 hours out with whatever scheduling the session has
+non-blocking check-in ~1 hour out with whatever scheduling the session has
 (a scheduled task, a monitored background shell), then re-check hourly until
-CI goes green or fails. Spark CI takes hours, so checking sooner is pure
-polling. At each check-in: refresh PR state (`gh pr view`, `gh pr checks`),
+CI goes green or fails. The first check is at 1h because the fast failures
+(lint, static checks, compile) show up early and `spark-presend --fast`
+should have caught them but might not have; the full suites take hours, so
+hourly is the cadence after that. At each check-in: refresh PR state
+(`gh pr view`, `gh pr checks`),
 triage unresolved review comments, fix failing CI, and push fixes as new
 commits on the PR branch. Green with nothing outstanding stops the loop; say
 so when it stops. If the session has no way to schedule, say so instead of
