@@ -76,6 +76,18 @@ review comments, fix failing CI, push fixes as new commits on the PR branch.
 Green with nothing outstanding stops the loop; say so when it stops. If the
 session has no scheduler, say so instead of claiming one.
 
+When a check-in finds a flaky CI failure, re-trigger CI instead of touching
+code. Be sure it is a flake first -- the failing test is unrelated to the
+diff and passes locally or on retry (the ci-investigator subagent classifies
+a check); a real failure gets a real fix, not a rebase. Then: fetch the PR's
+base from upstream, push it to origin
+(`git fetch upstream && git push origin upstream/<base>:<base>`), and rebase
+the branch onto the fresh base -- `~/bin/rebase_update.sh` does the fetch,
+base detection, rebase, co-author trailer check, clean compile, and the
+lease-pinned force-push to the fork, and that push is what re-triggers CI.
+Generally just do this: the only upstream operation is the fetch, and the
+push can only land on the fork.
+
 Pushing fixes to the draft branch and resolving its review threads are
 pre-authorized -- that is the loop's purpose. Still hers: `gh pr ready`,
 merging, and anything beyond what review and CI pointed at.
