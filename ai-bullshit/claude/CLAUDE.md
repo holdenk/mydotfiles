@@ -252,6 +252,22 @@ Ask before any external operation (push, PR, GitHub comment).
 she moves it to (`gh pr ready`) once CI has had a look; it is not the state you
 open it in. This does not loosen the gate above -- still ask first.
 
+## Then schedule the draft's check-in
+
+Opening the draft is not done-ness. Before ending the turn, arm a
+non-blocking check-in ~4 hours out with whatever scheduling the session has
+(a scheduled task, a monitored background shell), then re-check hourly until
+CI goes green or fails. Spark CI takes hours, so checking sooner is pure
+polling. At each check-in: refresh PR state (`gh pr view`, `gh pr checks`),
+triage unresolved review comments, fix failing CI, and push fixes as new
+commits on the PR branch. Green with nothing outstanding stops the loop; say
+so when it stops. If the session has no way to schedule, say so instead of
+claiming one.
+
+Pushing fixes to the draft branch and resolving its review threads are
+pre-authorized -- that is the loop's purpose. Still hers: `gh pr ready`,
+merging, and anything beyond what review and CI pointed at.
+
 ## Co-author trailers: both addresses, on every commit
 
 Every commit message you write ends with both of these, in every repo -- not
