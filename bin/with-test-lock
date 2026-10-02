@@ -34,16 +34,38 @@ status() {
   mkdir -p "$LOCK_DIR"
   # MAX_SLOTS, not SLOTS: a lowered --slots would otherwise hide holders above it,
   # and hiding another user's build is the opposite of what this is for.
-  local i
+  local i holder pid p
   for i in $(seq 0 $((MAX_SLOTS - 1))); do
     # A successful non-blocking flock means the slot is free.
     if flock -n "$LOCK_DIR/slot-$i" true 2>/dev/null; then
       rm -f "$LOCK_DIR/slot-${i}.holder"
       echo "slot $i: free"
-    elif [[ -f "$LOCK_DIR/slot-${i}.holder" ]]; then
-      echo "slot $i: $(cat "$LOCK_DIR/slot-${i}.holder")"
+      continue
+    fi
+    if [[ -f "$LOCK_DIR/slot-${i}.holder" ]]; then
+      # || true: the holder's wrapper removes the file at exit, so it can
+      # vanish between the -f check and the cat -- a busy box races here, and
+      # under set -e a bare cat failure aborts the wait loop's status call.
+      holder=$(cat "$LOCK_DIR/slot-${i}.holder" 2>/dev/null || true)
+      echo "slot $i: $holder"
+      # A dead holder pid means the run was killed and a surviving child
+      # inherited the lock fd -- the real culprits are named below.
+      pid=${holder#* pid=}
+      pid=${pid%% *}
+      # /proc first: kill -0 alone reports EPERM (another user's live
+      # process) as dead, which is a false leak report on a shared box.
+      if [[ "$pid" =~ ^[0-9]+$ ]] && [[ ! -e /proc/$pid ]] && ! kill -0 "$pid" 2>/dev/null; then
+        echo "  (holder pid $pid is dead: a child of that killed run holds the lock)"
+      fi
     else
       echo "slot $i: busy (no holder file)"
+    fi
+    # The flock lives on the open file description, so any process with the fd
+    # open holds the slot -- fuser names them when psmisc is installed.
+    if command -v fuser >/dev/null 2>&1; then
+      for p in $(fuser "$LOCK_DIR/slot-$i" 2>/dev/null || true); do
+        ps -o pid=,ppid=,etime=,cmd= -p "$p" 2>/dev/null | sed 's/^/  held by: /' || true
+      done
     fi
   done
 }
@@ -132,7 +154,10 @@ write_holder "$acquired_slot" "$*"
 echo "with-test-lock: got slot $acquired_slot" >&2
 
 set +e
-"$@"
+# Close the lock fd for the command: fds are inherited, so a surviving
+# grandchild (sbt server, setsid'd process) of a killed run would otherwise
+# keep the flock held with no live holder to blame for it.
+"$@" {acquired_fd}>&-
 rc=$?
 set -e
 echo "with-test-lock: releasing slot $acquired_slot (exit $rc)" >&2

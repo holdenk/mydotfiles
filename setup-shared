@@ -57,7 +57,11 @@ case " ${ID:-} ${ID_LIKE:-} " in
 esac
 
 $PKG_UPDATE
-$PKG_INSTALL git curl python3 "$EMACS_PKG" "$LIBSTDCXX_PKG"
+$PKG_INSTALL git curl python3 psmisc "$EMACS_PKG" "$LIBSTDCXX_PKG"
+# htop/screen on their own line: on some rh flavors they live in EPEL, and a
+# missing repo there must not abort the core install above (set -e).
+$PKG_INSTALL htop screen || \
+  setup_warn "could not install htop/screen (on the rh family these may need EPEL)"
 
 cp "$REPO/gitconfig" ~/.gitconfig
 git config --global user.email "holden@pigscanfly.ca"
