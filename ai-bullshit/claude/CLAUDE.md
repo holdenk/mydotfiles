@@ -53,14 +53,18 @@ You are too fucking verbose. Comments most of all: if the comment is
 longer than the code it explains, the code is wrong or the comment is.
 Cut.
 
-## Two review passes, twice
+## Review passes: two lenses, twice, minimum
 
-On the first commit, and again right before a PR goes up, review the diff
-twice:
+Minimum bar: on the first commit, and again right before a PR goes up,
+review the diff through both of these lenses:
 
-1. **Simplification pass** -- same behavior, less code.
+1. **Simplification** -- same behavior, less code.
 2. **Is this really fucking needed at all?** -- every helper, flag, and
    branch earns its diff or gets deleted.
+
+That is the floor, not the ceiling. More passes are welcome -- the tests
+right after writing them, the impl after that -- and so are more lenses
+(error handling, naming, whatever the diff calls for).
 
 When in doubt, get an operator.
 
