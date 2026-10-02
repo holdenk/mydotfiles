@@ -1,20 +1,19 @@
 #!/usr/bin/env bash
-# Hold 1 of N slots under /tmp/test-lock, run a command, release on exit.
+# Hold 1 of 6 slots under /tmp/test-lock, run a command, release on exit.
 # flock, not mkdir: a dead process drops the lock. Shared across Claude and Cursor.
 set -euo pipefail
 
 LOCK_DIR=/tmp/test-lock
-# The shared protocol is 6 slots. Lowering your own ceiling is fine; raising it is
-# not -- acquire() creates slot-6, slot-7 ... on demand, and every other user of
-# this box only ever probes 0-5, so those holders are invisible to exactly the
-# people the lock coordinates with.
+# The shared protocol is 6 slots, and 6 is not a knob: acquire() would create
+# slot-6, slot-7 ... on demand, and every other user of this box only ever
+# probes 0-5, so those holders would be invisible to exactly the people the
+# lock coordinates with.
 MAX_SLOTS=6
-SLOTS=$MAX_SLOTS
 POLL_SECS=5
 
 usage() {
-  echo "usage: with-test-lock [--slots N] -- command [args...]   (N <= 6)" >&2
-  echo "       with-test-lock [--slots N] --status" >&2
+  echo "usage: with-test-lock -- command [args...]" >&2
+  echo "       with-test-lock --status" >&2
   exit 2
 }
 
@@ -26,14 +25,8 @@ write_holder() {
     >"$LOCK_DIR/slot-${slot}.holder"
 }
 
-clear_holder() {
-  rm -f "$LOCK_DIR/slot-${1}.holder"
-}
-
 status() {
   mkdir -p "$LOCK_DIR"
-  # MAX_SLOTS, not SLOTS: a lowered --slots would otherwise hide holders above it,
-  # and hiding another user's build is the opposite of what this is for.
   local i holder pid p
   for i in $(seq 0 $((MAX_SLOTS - 1))); do
     # A successful non-blocking flock means the slot is free.
@@ -75,12 +68,21 @@ acquired_slot=""
 
 acquire() {
   local i fd
-  for i in $(seq 0 $((SLOTS - 1))); do
+  for i in $(seq 0 $((MAX_SLOTS - 1))); do
     exec {fd}>"$LOCK_DIR/slot-$i"
     if flock -n "$fd"; then
-      acquired_fd="$fd"
-      acquired_slot="$i"
-      return 0
+      # systemd-tmpfiles cleans /tmp daily (q /tmp ... 10d). If it unlinked
+      # this file between our open and flock, we hold a lock on an inode
+      # nobody can see, and the next opener re-creates the path and locks
+      # THAT -- two holders, one slot. Only trust the lock when the fd and
+      # the path still name the same file; otherwise drop it and move on.
+      # (-ef follows the /proc fd magic link and is false when either side
+      # is gone -- verified all three cases.)
+      if [[ "$LOCK_DIR/slot-$i" -ef "/proc/$$/fd/$fd" ]]; then
+        acquired_fd="$fd"
+        acquired_slot="$i"
+        return 0
+      fi
     fi
     exec {fd}>&-
   done
@@ -94,19 +96,6 @@ while [[ $# -gt 0 ]]; do
     --status)
       WANT_STATUS=1
       shift
-      ;;
-    --slots)
-      # Guarded: bare --slots died on set -u with "$2: unbound variable"
-      # instead of printing usage.
-      [[ $# -ge 2 ]] || usage
-      SLOTS="$2"
-      [[ "$SLOTS" =~ ^[1-9][0-9]*$ ]] || usage
-      if (( SLOTS > MAX_SLOTS )); then
-        echo "with-test-lock: --slots $SLOTS exceeds the shared cap of $MAX_SLOTS;" >&2
-        echo "  extra slots are invisible to everyone else on this box." >&2
-        exit 2
-      fi
-      shift 2
       ;;
     --)
       shift
@@ -139,7 +128,7 @@ fi
 
 mkdir -p "$LOCK_DIR"
 
-echo "with-test-lock: acquiring 1 of $SLOTS slots in $LOCK_DIR" >&2
+echo "with-test-lock: acquiring 1 of $MAX_SLOTS slots in $LOCK_DIR" >&2
 if ! acquire; then
   echo "with-test-lock: all slots busy; holders:" >&2
   status >&2
@@ -149,7 +138,7 @@ if ! acquire; then
   done
 fi
 
-trap 'clear_holder "$acquired_slot"' EXIT
+trap 'rm -f "$LOCK_DIR/slot-${acquired_slot}.holder"' EXIT
 write_holder "$acquired_slot" "$*"
 echo "with-test-lock: got slot $acquired_slot" >&2
 

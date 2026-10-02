@@ -61,9 +61,19 @@ NOW = time.strftime("%Y%m%d-%H%M%S")
 # deliberately absent: it never takes a string literal in the tree.
 BUILDER = r"(?:ConfigBuilder|buildConf|buildStaticConf)"
 CONF_BUILDER = re.compile(BUILDER + r"\(\s*\"([^\"]+)\"")
+# The terminator alternation must name every method that ends a builder
+# chain (ConfigBuilder.scala: createOptional, createWithDefault,
+# createWithDefaultFunction, createWithDefaultString, fallbackConf). The
+# genuinely-missing one was .fallbackConf (~25 uses in SQLConf): the .*?
+# body ran past it into the NEXT entry's terminator, so the entry's
+# version/doc checks read the wrong body and every entry in between never
+# matched at all (finditer resumes after the match).
+# .createWithDefaultString is listed only for clarity -- the
+# .createWithDefault alternative already prefix-matches it.
 CONF_ENTRY = re.compile(
     BUILDER + r"\(\s*\"(?P<key>[^\"]+)\"\)"
-    r"(?P<body>.*?)(?:\.createWithDefault|\.createOptional|\.createWithDefaultFunction)",
+    r"(?P<body>.*?)(?:\.createWithDefault|\.createOptional"
+    r"|\.createWithDefaultFunction|\.createWithDefaultString|\.fallbackConf)",
     re.S)
 CONF_VERSION = re.compile(r"\.version\(\s*\"([0-9]+\.[0-9]+(?:\.[0-9]+)?)\"\s*\)")
 CONF_ANY_VERSION = re.compile(r"\.version\(\s*\"([^\"]+)\"\s*\)")
@@ -180,8 +190,8 @@ def report(level, msg):
     say(f"{level.upper()}: {msg}")
 
 
-def git(root, *args, check=True):
-    p = subprocess.run(["git", *args], cwd=root,
+def git(root, *args, check=True, timeout=None):
+    p = subprocess.run(["git", *args], cwd=root, timeout=timeout,
                        capture_output=True, text=True, errors="replace")
     if check and p.returncode != 0:
         die(f"git {' '.join(args)} failed: {p.stderr.strip()}")
@@ -294,24 +304,39 @@ def has_binding_policy_api(root, base_ref):
 
 def collect_diff(root, base_ref):
     mb = git(root, "merge-base", "HEAD", base_ref).stdout.strip()
-    names = git(root, "diff", "--name-only", mb).stdout.splitlines()
+    # --diff-filter=d drops deleted files: nothing to lint or scan in a file
+    # that no longer exists.
+    names = git(root, "diff", "--name-only", "--diff-filter=d", mb) \
+        .stdout.splitlines()
     untracked = git(root, "ls-files", "--others", "--exclude-standard") \
         .stdout.splitlines()
     new_files = set(git(root, "diff", "--name-only", "--diff-filter=A", mb)
                     .stdout.splitlines()) | set(untracked)
     # Added lines per file, for conf/debug/ref scanning. -U0 keeps it small.
     # added_lines tracks new-file line numbers so conf checks can tell which
-    # entry in a file the diff actually touched.
+    # entry in a file the diff actually touched. removed tracks old-file line
+    # text so a conf MOVED to another file is not misread as a duplicate.
     added = {}        # file -> [added line text]
     added_lines = {}  # file -> set(new-file line numbers)
+    removed = {}      # old file -> [removed line text]
     cur = None
+    cur_old = None
     new_line = 0
-    for line in git(root, "diff", "-U0", mb).stdout.splitlines():
-        # Real +++ headers have a space after +++; an added line whose content
-        # starts with ++ (Scala ++=, Java ++i) does not.
+    # -c diff.noprefix=false: a user config with diff.noprefix=true strips
+    # the a//b/ prefixes this parser keys on.
+    for line in git(root, "-c", "diff.noprefix=false", "diff", "-U0", mb) \
+            .stdout.splitlines():
+        # Real +++/--- headers have a space after the marker; content lines
+        # starting with ++ (Scala ++=, Java ++i) or -- do not. A content
+        # line that still collides ("-- foo" -> "--- foo") fails the a//b/
+        # prefix test below, which costs line tracking for the rest of that
+        # one file -- contained, and near-impossible in scala/java.
         if line.startswith("+++ ") or line.startswith('+++"'):
             h = line[4:].strip().strip('"')
             cur = h[2:] if h.startswith("b/") else None
+        elif line.startswith("--- ") or line.startswith('---"'):
+            h = line[4:].strip().strip('"')
+            cur_old = h[2:] if h.startswith("a/") else None
         elif line.startswith("@@") and cur:
             m = re.search(r"\+(\d+)(?:,(\d+))?", line)
             new_line = int(m.group(1)) if m else 0
@@ -321,7 +346,9 @@ def collect_diff(root, base_ref):
             added.setdefault(cur, []).append(line[1:])
             added_lines.setdefault(cur, set()).add(new_line)
             new_line += 1
-        elif not line.startswith("-") and cur:
+        elif line.startswith("-") and cur_old:
+            removed.setdefault(cur_old, []).append(line[1:])
+        elif cur:
             new_line += 1
     # Untracked files have no diff lines; treat the whole file as added.
     for f in untracked:
@@ -332,7 +359,7 @@ def collect_diff(root, base_ref):
         except OSError:
             pass
     files = sorted({*names, *untracked} - {""})
-    return mb, files, new_files, added, added_lines
+    return mb, files, new_files, added, added_lines, removed
 
 
 # --- static checks -----------------------------------------------------------
@@ -382,7 +409,8 @@ def conf_defined_on_base(root, base_ref, key):
     return [l.split(":", 1)[1] for l in p.stdout.splitlines()]
 
 
-def check_confs(root, base_ref, base_ver, entries, counts, binding_policy):
+def check_confs(root, base_ref, base_ver, entries, counts, binding_policy,
+                removed):
     """Config-flag checks on every conf entry the diff touches. The version
     must match the branch the conf lands on (SPARK-52611 shipped 4.0.0 on
     branch-3.5 and had to be fixed to 3.5.1); new confs need a doc and, where
@@ -402,10 +430,20 @@ def check_confs(root, base_ref, base_ver, entries, counts, binding_policy):
             report("error", f"conf {key}: defined {counts[(key, f)]} times in "
                             f"{f} -- the second definition shadows the first")
         base_files = conf_defined_on_base(root, base_ref, key)
-        elsewhere = [bf for bf in base_files if bf != f]
-        if elsewhere:
-            report("error", f"conf {key}: already defined on {base_ref} "
-                            f"({elsewhere[0]}); adding a second definition")
+        # ["?"] means the base lookup FAILED (see conf_defined_on_base); it
+        # is not a file, and treating it as one manufactures a spurious
+        # "already defined on base (?)" error.
+        if base_files and base_files != ["?"]:
+            elsewhere = [bf for bf in base_files if bf != f]
+            # A conf MOVED between files shows its builder call in the diff's
+            # removed lines for the old file; that is a move, not a dup.
+            moved = {bf for bf in elsewhere
+                     if any(m.group(1) == key for l in removed.get(bf, [])
+                            for m in [CONF_BUILDER.search(l)] if m)}
+            elsewhere = [bf for bf in elsewhere if bf not in moved]
+            if elsewhere:
+                report("error", f"conf {key}: already defined on {base_ref} "
+                                f"({elsewhere[0]}); adding a second definition")
         if not base_files:
             new_keys[key] = f
         vm = CONF_VERSION.search(body)
@@ -543,7 +581,9 @@ def check_migration_guide(base, files, new_keys):
 
 
 def check_build_files(files):
-    if "pom.xml" in files and not any(f.startswith("dev/deps/") for f in files):
+    # Module poms declare dependencies too, not just the root one.
+    if any(Path(f).name == "pom.xml" for f in files) \
+            and not any(f.startswith("dev/deps/") for f in files):
         report("warn", "pom.xml changed without a dev/deps/ manifest update -- "
                        "run ./dev/test-dependencies.sh if dependencies moved")
     if any(f.endswith(".proto") for f in files):
@@ -665,6 +705,10 @@ def lint_phase(root, logdir, files, changed_py, skip_lint):
     if (Path(root) / ".git").is_file() and excludes.is_file():
         original_excludes = excludes.read_bytes()
         with open(excludes, "ab") as ef:
+            # A missing trailing newline would glue ".git" onto the last
+            # pattern and corrupt it.
+            if original_excludes and not original_excludes.endswith(b"\n"):
+                ef.write(b"\n")
             ef.write(b".git\n")
         # Idempotent, so leaving it registered after the finally restores is
         # fine; it only matters if the watchdog fires mid-lint.
@@ -672,24 +716,40 @@ def lint_phase(root, logdir, files, changed_py, skip_lint):
 
     runner = LintRunner(root, logdir)
     ok = True
+    # Not a `with` block: its __exit__ is shutdown(wait=True), which on a
+    # Ctrl-C would join workers blocked in communicate() for up to the 60min
+    # lint timeout -- a Ctrl-C that looks like a hang.
+    ex = ThreadPoolExecutor(max_workers=len(jobs))
+    interrupted = False
     try:
         # The jobs are independent and cheap, so run them concurrently; each
         # still gets its own 60min timeout and log. outs stays in job order,
         # so the report below is deterministic.
-        with ThreadPoolExecutor(max_workers=len(jobs)) as ex:
-            futs = [ex.submit(runner.run, name, cmd,
-                              cwd=str(Path(root) / jobcwd) if jobcwd else None)
-                    for name, cmd, jobcwd in jobs]
-            outs = []
-            for f, (name, _, _) in zip(futs, jobs):
-                try:
-                    outs.append(f.result())
-                except Exception as e:
-                    # A linter that will not even start is a RED with a
-                    # message, not a traceback that hides the other jobs.
-                    outs.append((127, logdir / f"lint-{name}.log",
-                                 f"lint-{name} failed to start: {e}\n"))
+        futs = [ex.submit(runner.run, name, cmd,
+                          cwd=str(Path(root) / jobcwd) if jobcwd else None)
+                for name, cmd, jobcwd in jobs]
+        outs = []
+        for f, (name, _, _) in zip(futs, jobs):
+            try:
+                outs.append(f.result())
+            except Exception as e:
+                # A linter that will not even start is a RED with a
+                # message, not a traceback that hides the other jobs.
+                outs.append((127, logdir / f"lint-{name}.log",
+                             f"lint-{name} failed to start: {e}\n"))
+    except KeyboardInterrupt:
+        interrupted = True
+        # Kill the linters so the workers' communicate() returns and the
+        # process can actually exit. poll() first: a tracked-but-exited
+        # child's pid may have been reused by someone else on this shared
+        # box (same reason wall_watchdog filters).
+        with _CHILDREN_LOCK:
+            kids = [p for p in _CHILDREN if p.poll() is None]
+        for p in kids:
+            kill_tree(p.pid)
+        raise
     finally:
+        ex.shutdown(wait=not interrupted, cancel_futures=True)
         if original_excludes is not None:
             excludes.write_bytes(original_excludes)
     for (name, _, _), (rc, logfile, out) in zip(jobs, outs):
@@ -713,10 +773,21 @@ def lint_phase(root, logdir, files, changed_py, skip_lint):
             mine = [e for e in errs
                     if any(c == e or c.endswith("/" + e)
                            for c in changed_py)]
-            if errs and not mine:
+            # The exemption is for the KNOWN pandas-stubs drift only, which
+            # lives in pyspark/pandas/* and pyspark/sql/pandas/types.py. An
+            # error anywhere else blocks even when the file is untouched by
+            # the diff: a signature change errors at the call site, not the
+            # definition, and "not a file I touched" is exactly where those
+            # land.
+            def _known_drift(e):
+                p = e[len("python/"):] if e.startswith("python/") else e
+                return (p.startswith("pyspark/pandas/")
+                        or p == "pyspark/sql/pandas/types.py")
+            nondrift = [e for e in errs if not _known_drift(e)]
+            if errs and not mine and not nondrift:
                 report("warn", f"lint-python failed but all {len(errs)} "
-                               "mypy errors are in files this diff does "
-                               "not touch (known pandas-stubs drift); "
+                               "mypy errors are in the known pandas-stubs "
+                               "drift paths and outside this diff; "
                                "not blocking")
                 continue
         report("error", f"lint-{name} FAILED (rc={rc}); see {logfile}")
@@ -756,6 +827,8 @@ def main():
                     help="kill the whole run after H hours (default 24; a "
                          "presend that old is wedged, not thorough). 0 disables")
     args = ap.parse_args()
+    if args.max_wall_hours < 0:
+        ap.error("--max-wall-hours must be >= 0 (0 disables the watchdog)")
 
     root = subprocess.run(["git", "rev-parse", "--show-toplevel"],
                           capture_output=True, text=True)
@@ -771,14 +844,21 @@ def main():
 
     base = detect_base(root, args.base)
     if git(root, "remote", "get-url", "upstream", check=False).returncode == 0:
-        # Best-effort freshness for the diff base; offline must not block.
-        git(root, "fetch", "--quiet", "upstream", base, check=False)
+        # Best-effort freshness for the diff base; offline must not block,
+        # and neither must a wedged remote.
+        try:
+            git(root, "fetch", "--quiet", "upstream", base, check=False,
+                timeout=120)
+        except subprocess.TimeoutExpired:
+            say("git fetch upstream timed out after 120s; using the refs "
+                "already here")
     base_ref = f"upstream/{base}" if git(
         root, "rev-parse", "--verify", "--quiet", f"refs/remotes/upstream/{base}",
         check=False).returncode == 0 else base
     bver = base_version(root, base_ref)
     branch = git(root, "branch", "--show-current").stdout.strip()
-    mb, files, new_files, added, added_lines = collect_diff(root, base_ref)
+    mb, files, new_files, added, added_lines, removed = \
+        collect_diff(root, base_ref)
     if len(files) > 500 and not args.base:
         die(f"{len(files)} changed files vs {base_ref} -- the auto-detected "
             f"base '{base}' is almost certainly wrong (master-based branch "
@@ -799,7 +879,7 @@ def main():
         entries, counts = touched_conf_entries(root, added_lines)
         binding_policy = has_binding_policy_api(root, base_ref)
         new_keys = check_confs(root, base_ref, bver, entries, counts,
-                               binding_policy)
+                               binding_policy, removed)
         check_binding_policy_backport(root, base_ref, added, binding_policy)
         check_conf_refs(root, base_ref, added, {k for k, _, _ in entries})
         check_license_headers(root, new_files)

@@ -40,7 +40,6 @@ Usage:
 """
 
 import argparse
-import fcntl
 import os
 import re
 import resource
@@ -59,9 +58,6 @@ from pathlib import Path
 LOCK_HELPER = str(Path(__file__).resolve().parent / "with-test-lock")
 # One source of truth for "which JDK does THIS branch accept" -- see resolve_jdk().
 JDK_HELPER = str(Path(__file__).resolve().parent / "set_spark_jdk_to_ok")
-LOCK_DIR = "/tmp/test-lock"
-LOCK_SLOTS = 6
-
 DOC_ONLY = re.compile(
     r"(^docs/|^\.github/|^dev/|^LICENSE|^NOTICE|\.md$|\.rst$|\.markdown$)")
 BUILD_FILES = re.compile(r"(^|/)pom\.xml$|^project/|^build\.sbt$|^build/")
@@ -79,8 +75,22 @@ KNOWN_MODULES = {
     "kubernetes", "yarn", "hadoop-cloud", "assembly", "examples", "tools",
 }
 
-SUITE_HDR = re.compile(r"^\[info\] ([\w$]+(?:\.[\w$]+)+):\s*$")
+# sbt prints suite headers with the SIMPLE class name ([info] FooSuite:),
+# not the FQCN -- 2320 headers in a real run, zero dotted. No name-suffix
+# filter either: 5 of those 2320 end in neither Suite/Test/Benchmark/Spec
+# (ParquetDeltaEncodingLong, ...), and header-shaped non-suite lines do not
+# occur in practice.
+SUITE_HDR = re.compile(r"^\[info\] ([\w$]+(?:\.[\w$]+)*):\s*$")
 TEST_FAIL = re.compile(r"^\[info\] - (.*?) \*\*\* FAILED \*\*\*")
+# A whole suite aborted (crashed JVM, OOM in the runner). Suite-level only:
+# the FQCN token keeps a test-level "- name *** ABORTED ***" (an assume()
+# skip) from reading as a dead suite.
+SUITE_ABORT = re.compile(r"^\[info\] ([\w$.]+) \*\*\* ABORTED \*\*\*")
+# sbt prints this when the test task FINISHES, even with failed or aborted
+# suites: [error] (hive / Test / test) sbt.TestsFailedException ... (testOnly
+# for single-suite runs). Its absence on a red run means sbt or the forked
+# JVM died mid-module and every suite after that point never ran.
+TASK_END = re.compile(r"^\[error\] \(\S+ / Test / test(?:Only)?\) ")
 FAILED_SUITE_LINE = re.compile(r"^\[error\] \t([\w$]+(?:\.[\w$]+)+)\s*$")
 COMPILE_FAIL = re.compile(r"Compilation failed|error compiling")
 PY_FAIL = re.compile(r"^(?:FAIL|ERROR): (\w+) \(([\w.]+)\)")
@@ -111,6 +121,9 @@ class Item:
         self.pattern = pattern      # testOnly glob | dotted unittest spec
         self.why = why
         self.env_extra = env_extra or {}
+        # Batch runs fill this with the suite patterns that never started
+        # (abort/timeout), so phase 3 reports them instead of a silent green.
+        self.unrun = []
 
     def name(self):
         if self.kind == "scala":
@@ -187,8 +200,10 @@ def module_for_path(root, modules, relpath):
     return best
 
 
-def discover_scala_suites(modules, mod, stem, cap=10):
-    """Find *Suite/*Test classes in a module whose names start with stem."""
+def discover_scala_suites(modules, mod, stem):
+    """Find *Suite/*Test classes in a module whose names start with stem.
+    Capped at 10: a one-letter stem from a renamed file is a bad derivation,
+    not a reason to run half the module."""
     d = modules.get(mod)
     if d is None:
         return []
@@ -201,7 +216,7 @@ def discover_scala_suites(modules, mod, stem, cap=10):
             for f in base.rglob(pat + ".*"):
                 if f.suffix in (".scala", ".java"):
                     found.add(f.stem)
-    return sorted(found)[:cap]
+    return sorted(found)[:10]
 
 
 def py_dotted(root, path):
@@ -244,7 +259,10 @@ def changed_files(root, base):
     if mb.returncode != 0:
         die(f"git merge-base HEAD {base} failed: {mb.stderr.strip()}")
     mb = mb.stdout.strip()
-    diff = subprocess.run(["git", "diff", "--name-only", mb],
+    # --diff-filter=d drops deleted files: there is nothing to map to a
+    # suite, and a deleted test file would otherwise derive a suite run for
+    # code that no longer exists.
+    diff = subprocess.run(["git", "diff", "--name-only", "--diff-filter=d", mb],
                           cwd=root, capture_output=True, text=True, check=True).stdout
     untracked = subprocess.run(
         ["git", "ls-files", "--others", "--exclude-standard"],
@@ -301,7 +319,7 @@ def plan_from_diff(root, modules, files, run_all_modules):
         items.append(item)
 
     code = [f for f in files if not DOC_ONLY.search(f)]
-    if any(BUILD_FILES.search(f) for f in files):
+    if any(BUILD_FILES.search(f) for f in files) and not run_all_modules:
         notes.append("build files changed: the build step covers compilation; "
                      "consider --modules if build logic itself changed")
     transpile_touched = any("transpile" in f and f.startswith("python/") for f in code)
@@ -357,6 +375,30 @@ def plan_from_diff(root, modules, files, run_all_modules):
     return items, notes
 
 
+def suite_class_declared(d, stem_glob):
+    """A test-class declaration matching the glob exists under d's test
+    trees. testOnly globs match CLASS names, and Spark has suites whose
+    class name differs from the file name (ShuffleNettyNioSuite lives in
+    ShuffleNettySuite.scala), so file-name matching alone rejects real
+    suites. Content-greps every test file: fine for a CLI one-off, too slow
+    as a first check."""
+    rx = re.compile(r"^\s*(?:abstract\s+)?(?:final\s+)?class\s+"
+                    + re.escape(stem_glob).replace(r"\*", ".*").replace(r"\?", ".")
+                    + r"[\s(]", re.M)
+    for td in ("src/test/scala", "src/test/java"):
+        base = d / td
+        if not base.exists():
+            continue
+        for ext in ("*.scala", "*.java"):
+            for f in base.rglob(ext):
+                try:
+                    if rx.search(f.read_text(errors="replace")):
+                        return True
+                except OSError:
+                    continue
+    return False
+
+
 def resolve_explicit(root, modules, spec):
     """Turn a command-line spec into Items."""
     if spec.startswith("py:"):
@@ -367,6 +409,21 @@ def resolve_explicit(root, modules, spec):
         mod, pat = spec.split("/", 1)
         if mod not in modules:
             die(f"unknown SBT module '{mod}' in spec '{spec}'")
+        # sbt exits 0 on "No tests to run", so a typo'd glob is a silent
+        # green unless the glob names at least one test file. FQCN patterns
+        # (sql/org.apache.spark.sql.RocksDBSuite) are legal testOnly specs;
+        # check existence on the simple name.
+        check = pat.rsplit(".", 1)[-1] if "." in pat else pat
+        stem_glob = check if "*" in check else f"{check}*"
+        d = modules[mod]
+        hits = [f for td in ("src/test/scala", "src/test/java")
+                if (d / td).exists()
+                for f in (d / td).rglob(f"{stem_glob}.*")
+                if f.suffix in (".scala", ".java")]
+        if not hits and not suite_class_declared(d, stem_glob):
+            die(f"no test files or classes matching '{stem_glob}' under "
+                f"{mod}/src/test; sbt would exit 0 on 'No tests to run' "
+                "and call that green")
         return [Item("scala", mod, pat, "cli")]
     if spec.startswith("test_"):
         hits = [f for f in (Path(root) / "python").rglob(f"{spec}.py")
@@ -430,29 +487,12 @@ class Runner:
             })
         return env
 
-    def _acquire_fallback(self):
-        """Only used when the with-test-lock helper is missing: same protocol,
-        6 flock files, hold the fd for the life of the child."""
-        os.makedirs(LOCK_DIR, exist_ok=True)
-        while True:
-            for i in range(LOCK_SLOTS):
-                fd = os.open(f"{LOCK_DIR}/slot-{i}", os.O_RDWR | os.O_CREAT, 0o644)
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    say(f"fallback lock: got slot {i}")
-                    return fd
-                except BlockingIOError:
-                    os.close(fd)
-            say("fallback lock: all slots busy, waiting")
-            time.sleep(5)
-
     def run(self, cmd, logfile, env, timeout=None):
         """Run cmd under the shared lock, stream output to stdout AND logfile
         (never pipe through tail/grep: a hung job must look hung)."""
         timeout = timeout or self.timeout
-        use_helper = os.path.exists(LOCK_HELPER)
-        full = [LOCK_HELPER, "--"] + cmd if use_helper else cmd
-        fd = None if use_helper else self._acquire_fallback()
+        # env_checks has already verified LOCK_HELPER exists.
+        full = [LOCK_HELPER, "--"] + cmd
         say("+ " + " ".join(cmd) + f"   [log: {logfile}]")
         finished = threading.Event()
         timed_out = False
@@ -484,8 +524,6 @@ class Runner:
             finally:
                 finished.set()
                 self.current_proc = None
-                if fd is not None:
-                    os.close(fd)
         if timed_out:
             say(f"TIMEOUT after {timeout // 60}min: {' '.join(cmd)}")
             return -signal.SIGKILL, True
@@ -521,8 +559,9 @@ def parse_scala_failures(logfile, start=0):
                 m = TEST_FAIL.match(line)
                 if m and current_suite:
                     failed.append((current_suite, m.group(1)))
-                if "ABORTED" in line and current_suite:
-                    suite_level.append(current_suite)
+                m = SUITE_ABORT.match(line)
+                if m:
+                    suite_level.append(m.group(1))
                 if COMPILE_FAIL.search(line):
                     compile_failed = True
                 m = FAILED_SUITE_LINE.match(line)
@@ -542,7 +581,10 @@ def parse_py_failures(logfile):
                 if m:
                     # unittest.loader._FailedTest means the module itself did
                     # not import; there is no individual test to retry.
-                    if m.group(2) == "unittest.loader._FailedTest":
+                    # 3.11+ suffixes the module (._FailedTest.test_foo), so
+                    # an exact match alone is dead there.
+                    if m.group(2) == "unittest.loader._FailedTest" or \
+                            m.group(2).startswith("unittest.loader._FailedTest."):
                         continue
                     modcls, test = m.group(2), m.group(1)
                     # Python 3.11+ prints (module.Class.test); 3.9 prints
@@ -600,7 +642,6 @@ def run_scala_batch(runner, mod, group, logfile, env):
     batch = Item("scala", mod,
                  group[0].pattern if len(group) == 1 else "--batch--",
                  f"{len(group)} diff-derived suite(s) in {mod}")
-    batch.unrun = []
     pending = [it.pattern for it in group]
     overall_rc, timed_out, do_overs, marker_base = 0, False, 1, 0
     any_failures = False
@@ -626,7 +667,7 @@ def run_scala_batch(runner, mod, group, logfile, env):
         if rc == 0:
             # overall_rc, not 0: an earlier round's failures still need phase
             # 3's retries, and it skips entries whose rc is 0.
-            return batch, overall_rc, False, logfile
+            return batch, overall_rc, False
         failed, suite_level, compile_failed = parse_scala_failures(
             logfile, start=log_pos)
         round_failed = bool(failed or suite_level)
@@ -671,7 +712,7 @@ def run_scala_batch(runner, mod, group, logfile, env):
             break
         say(f"{mod}: sbt aborted mid-batch; re-batching {len(rest)} suite(s)")
         pending = rest
-    return batch, overall_rc, timed_out, logfile
+    return batch, overall_rc, timed_out
 
 
 # --- environment checks ---------------------------------------------------------
@@ -688,8 +729,10 @@ def jdk_version(java_home):
         return None
     try:
         p = subprocess.run([str(java), "-XshowSettings:properties", "-version"],
-                           capture_output=True, text=True)
-    except OSError:
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        # A wedged java binary (hung NFS home, broken loader) must not hang
+        # the whole preflight.
         return None
     m = re.search(r"^\s*java\.version = (\S+)", p.stdout + p.stderr, re.M)
     return m.group(1) if m else None
@@ -757,15 +800,21 @@ def resolve_jdk(root):
     to find that out now than three hours into a run.
     """
     if os.access(JDK_HELPER, os.X_OK):
-        p = subprocess.run([JDK_HELPER], cwd=root, capture_output=True, text=True)
-        for line in p.stdout.splitlines():
-            if line.startswith("export JAVA_HOME="):
-                home = line.split("=", 1)[1].strip()
-                os.environ["JAVA_HOME"] = home
-                return home, jdk_version(home) or "?"
-        say(f"{Path(JDK_HELPER).name} could not pick a JDK for this branch:")
-        for line in p.stderr.strip().splitlines()[-4:]:
-            say(f"  {line}")
+        try:
+            p = subprocess.run([JDK_HELPER], cwd=root, capture_output=True,
+                               text=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            p = None
+            say(f"{Path(JDK_HELPER).name} timed out after 120s")
+        if p is not None:
+            for line in p.stdout.splitlines():
+                if line.startswith("export JAVA_HOME="):
+                    home = line.split("=", 1)[1].strip()
+                    os.environ["JAVA_HOME"] = home
+                    return home, jdk_version(home) or "?"
+            say(f"{Path(JDK_HELPER).name} could not pick a JDK for this branch:")
+            for line in p.stderr.strip().splitlines()[-4:]:
+                say(f"  {line}")
         # Say it plainly. Without the helper there is no per-branch rule here, so
         # whatever JAVA_HOME holds may well be one this branch rejects -- and the
         # nix repoint below only covers nix, while setup-shared's default is a
@@ -816,20 +865,26 @@ def env_checks(root, venv_py, need_py):
                 f"(check .venv/bin/python3 symlink vs pyvenv.cfg version): "
                 f"{probe.stderr.strip().splitlines()[-1] if probe.stderr else '?'}")
     if not os.path.exists(LOCK_HELPER):
-        say(f"WARNING: {LOCK_HELPER} missing; using built-in flock fallback")
+        die(f"{LOCK_HELPER} is missing -- it ships next to this script in "
+            "the dotfiles repo, so its absence means a broken checkout. The "
+            "lock is what keeps concurrent test JVMs from timing each other "
+            "out on this shared box; running unlocked is not a fallback.")
     # RocksDB JNI extracts librocksdbjni.so into java.io.tmpdir and execs it.
     # For PySpark-launched JVMs that is /tmp (verified: TMPDIR does not move
     # java.io.tmpdir), so a noexec /tmp is a hard fail, not a surprise later.
-    probe = Path("/tmp/.ctar-exec-check")
+    # mkstemp, not a fixed name: two concurrent runs must not unlink each
+    # other's probe mid-exec.
+    fd, probe = tempfile.mkstemp(dir="/tmp", prefix=".ctar-exec-check-")
     try:
-        probe.write_text("#!/bin/sh\nexit 0\n")
-        probe.chmod(0o700)
-        if subprocess.run([str(probe)], capture_output=True).returncode != 0:
+        with os.fdopen(fd, "w") as pf:
+            pf.write("#!/bin/sh\nexit 0\n")
+        os.chmod(probe, 0o700)
+        if subprocess.run([probe], capture_output=True).returncode != 0:
             die("/tmp exists but failed to exec a probe script")
     except OSError as e:
         die(f"/tmp is noexec or broken ({e}); RocksDB native loading will fail")
     finally:
-        probe.unlink(missing_ok=True)
+        Path(probe).unlink(missing_ok=True)
     # InetAddress.getLocalHost() must return a usable address: whatever calls
     # it (SparkHadoopUtil when AWS_* are set, some suites directly) dies with
     # UnknownHostException on a host whose name resolves only to link-local
@@ -985,7 +1040,6 @@ def main():
     signal.signal(signal.SIGTERM, on_signal)
 
     started = time.time()
-    build_ok = True
     if not args.skip_build:
         say("=== phase 1: build (build/sbt -Phive package) ===")
         rc, _ = runner.run(["build/sbt", "-Phive", "package"],
@@ -1026,8 +1080,9 @@ def main():
             logfile = logdir / (re.sub(r"[^\w.-]+", "_", batch_name) + ".log")
             # scala items carry no env_extra; any group member's env will do.
             env = runner.env_for(group[0], venv_py)
-            suite_results.append(
-                run_scala_batch(runner, payload, group, logfile, env))
+            batch, rc, timed_out = run_scala_batch(
+                runner, payload, group, logfile, env)
+            suite_results.append((batch, rc, timed_out, logfile))
             continue
         it = payload
         logfile = logdir / (re.sub(r"[^\w.-]+", "_", it.name()) + ".log")
@@ -1045,11 +1100,28 @@ def main():
         if rc != 0 and not timed_out:
             # SBT itself dies sometimes (ivy hiccup, OOM in the build JVM).
             # One do-over for the whole suite before parsing failures.
-            say(f"{it.name()}: rc={rc}, checking whether it even reached the tests")
-            failed = (parse_scala_failures(logfile)[0] if it.kind == "scala"
-                      else parse_py_failures(logfile))
-            if not failed:
-                say(f"{it.name()}: no test failures parsed; retrying the whole suite once")
+            say(f"{it.name()}: rc={rc}, checking whether the run completed")
+            if it.kind == "scala":
+                # The do-over is for runs that died before completing; a run
+                # that completed with failures goes straight to phase 3
+                # (parsed failures used to gate this, which re-ran a 4.7h
+                # sql module for nothing). Parsed failures alone cannot
+                # prove completion: an abort can kill the forked JVM after
+                # them, and every later suite then never runs -- observed:
+                # connect-client-jdbc, 6 ABORTED lines, no task-end marker.
+                completed = False
+                try:
+                    with open(logfile, errors="replace") as lf:
+                        for line in lf:
+                            if TASK_END.search(line):
+                                completed = True
+                                break
+                except OSError:
+                    pass
+            else:
+                completed = bool(parse_py_failures(logfile))
+            if not completed:
+                say(f"{it.name()}: test task never finished; retrying the whole suite once")
                 rc, timed_out = runner.run(it.cmd(root, venv_py), logfile, env,
                                            timeout=timeout)
         suite_results.append((it, rc, timed_out, logfile))
@@ -1057,7 +1129,7 @@ def main():
     say("=== phase 3: re-run each failed test individually ===")
     flakes, real, not_retried = [], [], []
     for it, rc, timed_out, logfile in suite_results:
-        for p in getattr(it, "unrun", []):
+        for p in it.unrun:
             not_retried.append((it, f"never finished (batch aborted or "
                                     f"timed out): {p}", logfile))
         if rc == 0:
@@ -1069,11 +1141,26 @@ def main():
                 continue
             retry_specs = [(f"*{s.split('.')[-1]}", t, f"{s}::{t}") for s, t in failed]
             for s in suite_level:
-                if not any(s == fs for fs, _ in failed):
+                # failed carries the header's simple name, suite_level the
+                # FQCN from sbt's "Failed tests:" summary -- same suite,
+                # different strings, so compare on the simple name or every
+                # failed suite gets retried twice (per-test AND whole-suite).
+                if not any(s.rsplit(".", 1)[-1] == fs.rsplit(".", 1)[-1]
+                           for fs, _ in failed):
                     retry_specs.append((f"*{s.split('.')[-1]}", None, s))
         else:
             failed = parse_py_failures(logfile)
-            retry_specs = [(None, f"{mc}.{t}", f"{mc}.{t}") for mc, t in failed]
+            retry_specs = []
+            for mc, t in failed:
+                # Fixtures are not runnable test names -- "unittest
+                # module.Class.setUpClass" errors out and the retry would
+                # report a real failure. A fixture failure belongs to the
+                # whole class (or module, when mc is bare).
+                if t in ("setUpClass", "tearDownClass",
+                         "setUpModule", "tearDownModule"):
+                    retry_specs.append((None, mc, mc))
+                else:
+                    retry_specs.append((None, f"{mc}.{t}", f"{mc}.{t}"))
         # The combined batch log can name the same test once per round.
         retry_specs = list(dict.fromkeys(retry_specs))
         if not retry_specs:

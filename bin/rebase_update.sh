@@ -59,15 +59,14 @@ run_step() {
   "$@" || { echo "step failed (rc=$?): $*" >&2; exit 1; }
 }
 # Siblings of this script (resolve through the ~/bin symlink), so moving the
-# mydotfiles checkout never stales these. LOCK_HELPER overrides the helper
-# used here (--full-test only); spark-compile-test-and-retry resolves its own
-# and ignores it.
+# mydotfiles checkout never stales these. Used here for --full-test only;
+# spark-compile-test-and-retry resolves its own.
 # Split out: a failing readlink nested inside another $() is swallowed even
 # under set -e, leaving SCRIPT_DIR as the invocation cwd.
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 [ -n "$SELF" ] || { echo "cannot resolve own path" >&2; exit 1; }
 SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
-LOCK_HELPER="${LOCK_HELPER:-$SCRIPT_DIR/with-test-lock}"
+LOCK_HELPER="$SCRIPT_DIR/with-test-lock"
 
 # Via a variable: cd "" is a silent no-op, so outside a repo the cd would
 # succeed and the script would run against the wrong tree.
@@ -274,11 +273,8 @@ echo "Rebasing onto $BASE_REF ($REPLAY commit(s) to replay)"
 
 run_step git rebase "$BASE_REF"
 
-# COAUTHOR env var overrides, same as LOCK_HELPER above.
-if [ -z "${COAUTHOR:-}" ]; then
-  COAUTHOR="$HOME/franktheunicorn/tools/add_coauthor.sh"
-  [ -x "$COAUTHOR" ] || COAUTHOR="../franktheunicorn/tools/add_coauthor.sh"
-fi
+COAUTHOR="$HOME/franktheunicorn/tools/add_coauthor.sh"
+[ -x "$COAUTHOR" ] || COAUTHOR="../franktheunicorn/tools/add_coauthor.sh"
 if [ ! -x "$COAUTHOR" ]; then
   echo "add_coauthor.sh not found in $HOME/franktheunicorn/tools or ../franktheunicorn/tools" >&2
   exit 1
