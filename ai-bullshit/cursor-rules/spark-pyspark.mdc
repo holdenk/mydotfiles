@@ -6,7 +6,7 @@ alwaysApply: true
 # Spark workspace mechanics
 
 Always wrap builds and tests in `bash ~/bin/with-test-lock -- ...`
-(5 slots under `/tmp/test-lock`; see `always-run-tests.mdc`). Do not skip
+(6 slots under `/tmp/test-lock`; see `always-run-tests.mdc`). Do not skip
 the Scala rebuild: Python tests against a stale jar are a lie.
 
 ## Java version for the branch

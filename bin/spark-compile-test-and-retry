@@ -14,6 +14,11 @@ Three speeds:
              she is in a hurry
 Explicit suite specs override the speed flags.
 
+Diff-derived scala suites run batched per module -- one sbt boot for the
+module's suites, not one per suite (a boot is minutes). sbt aborts the rest
+of a multi-command invocation on a failure, so never-started suites get
+re-batched; failed tests are still retried individually afterwards.
+
 Semi-resilient: a failing suite does not stop the run, a crashed SBT gets
 one do-over, and everything lands in target/compile-test-and-retry-logs/<ts>/.
 Each failed test is retried exactly ONCE. Fails twice -> real failure, and
@@ -53,7 +58,7 @@ LOCK_HELPER = str(Path(__file__).resolve().parent / "with-test-lock")
 # One source of truth for "which JDK does THIS branch accept" -- see resolve_jdk().
 JDK_HELPER = str(Path(__file__).resolve().parent / "set_spark_jdk_to_ok")
 LOCK_DIR = "/tmp/test-lock"
-LOCK_SLOTS = 5
+LOCK_SLOTS = 6
 
 DOC_ONLY = re.compile(
     r"(^docs/|^\.github/|^dev/|^LICENSE|^NOTICE|\.md$|\.rst$|\.markdown$)")
@@ -107,8 +112,11 @@ class Item:
 
     def name(self):
         if self.kind == "scala":
-            return f"{self.module}/all-suites" if self.pattern == "--all--" \
-                else f"{self.module}/{self.pattern}"
+            if self.pattern == "--all--":
+                return f"{self.module}/all-suites"
+            if self.pattern == "--batch--":
+                return f"{self.module}/batched-suites"
+            return f"{self.module}/{self.pattern}"
         return self.pattern
 
     def cmd(self, root, venv_py):
@@ -422,7 +430,7 @@ class Runner:
 
     def _acquire_fallback(self):
         """Only used when the with-test-lock helper is missing: same protocol,
-        5 flock files, hold the fd for the life of the child."""
+        6 flock files, hold the fd for the life of the child."""
         os.makedirs(LOCK_DIR, exist_ok=True)
         while True:
             for i in range(LOCK_SLOTS):
@@ -491,12 +499,19 @@ class Runner:
 
 # --- failure parsing ---------------------------------------------------------
 
-def parse_scala_failures(logfile):
-    """Return (failed [(suite, test)], suite_level [fqcn], compile_failed)."""
+def parse_scala_failures(logfile, start=0):
+    """Return (failed [(suite, test)], suite_level [fqcn], compile_failed).
+
+    start is a byte offset: only output from there on is parsed, so one
+    batch round can attribute failures to itself without earlier rounds'
+    failures confusing it."""
     failed, suite_level, compile_failed = [], [], False
     current_suite = None
     try:
         with open(logfile, errors="replace") as f:
+            if start:
+                f.seek(start)
+                f.readline()  # the offset may split a line
             for line in f:
                 m = SUITE_HDR.match(line)
                 if m:
@@ -536,6 +551,125 @@ def parse_py_failures(logfile):
     except OSError:
         pass
     return out
+
+
+# Anchored to a whole line: the runner logs the command line itself
+# ("$ build/sbt ... eval println(\"CTAR-BEGIN-0\") ..."), and an unanchored
+# match would read phantom markers off it.
+BATCH_MARK = re.compile(r"^CTAR-BEGIN-(\d+)\s*$")
+
+
+def started_commands(logfile):
+    """Marker indices of the batched commands sbt STARTED in this log.
+
+    An `eval println("CTAR-BEGIN-<k>")` precedes each testOnly in the batch,
+    so "command k started" is directly observable. Inferring it from suite
+    headers does not work: the glob '*StateStoreSuite' also matches
+    RocksDBStateStoreSuite's header, so a suite that never ran can look
+    started (and its skip would go green).
+    """
+    out = set()
+    try:
+        with open(logfile, errors="replace") as f:
+            for line in f:
+                m = BATCH_MARK.match(line)
+                if m:
+                    out.add(int(m.group(1)))
+    except OSError:
+        pass
+    return out
+
+
+def run_scala_batch(runner, mod, group, logfile, env):
+    """Run a module's diff-derived (or explicit-spec) suites as ONE sbt
+    invocation instead of one boot per suite (a boot is minutes; a fast-mode
+    diff can name a handful).
+
+    sbt aborts the remaining commands when one fails (verified: marker after
+    a failing command never prints, exit rc 1), so a failing suite would
+    silently skip the rest of the batch. Markers make the abort point exact:
+    sbt only advances past a command that succeeded, so every command before
+    the last started one completed green, any parsed failure belongs to the
+    last started one (phase 3 retries those individually from the combined
+    log, same as a standalone suite), and everything after it never ran and
+    gets re-batched. A round with no progress at all means sbt itself died:
+    one whole-batch do-over, same as the single-suite rule.
+    """
+    batch = Item("scala", mod,
+                 group[0].pattern if len(group) == 1 else "--batch--",
+                 f"{len(group)} diff-derived suite(s) in {mod}")
+    batch.unrun = []
+    pending = [it.pattern for it in group]
+    overall_rc, timed_out, do_overs, marker_base = 0, False, 1, 0
+    any_failures = False
+    while pending:
+        cmds = []
+        for i, p in enumerate(pending):
+            cmds.append(f'eval println("CTAR-BEGIN-{marker_base + i}")')
+            cmds.append(f"{mod}/testOnly {p}")
+        # Per-suite timeout times the batch size, capped like a module run.
+        timeout = min(len(pending) * runner.timeout, 8 * 3600)
+        log_pos = os.path.getsize(logfile) if os.path.exists(logfile) else 0
+        rc, timed_out = runner.run(["build/sbt", "-Phive", *cmds],
+                                   logfile, env, timeout=timeout)
+        # Marker indices are unique across rounds via marker_base; the range
+        # check rejects a test that prints a marker-shaped line. The log
+        # accumulates every round's output for phase 3's failure parsing,
+        # but attribution reads only this round's slice: a re-batched suite
+        # that fails AGAIN (an over-matching glob already ran it once) still
+        # belongs to this round's last started command.
+        started = {k - marker_base for k in started_commands(logfile)
+                   if marker_base <= k < marker_base + len(pending)}
+        marker_base += len(pending)
+        if rc == 0:
+            # overall_rc, not 0: an earlier round's failures still need phase
+            # 3's retries, and it skips entries whose rc is 0.
+            return batch, overall_rc, False, logfile
+        failed, suite_level, compile_failed = parse_scala_failures(
+            logfile, start=log_pos)
+        round_failed = bool(failed or suite_level)
+        any_failures = any_failures or round_failed
+        if compile_failed:
+            overall_rc = rc
+            say(f"{mod}: compile failed; not re-batching")
+            break
+        if timed_out:
+            # The interrupted suite's results are partial at best; it and
+            # everything after it count as unrun so phase 3 reports them
+            # instead of a silent green.
+            overall_rc = rc
+            batch.unrun = pending[max(started):] if started else list(pending)
+            say(f"{mod}: batch timed out; unrun: {batch.unrun}")
+            break
+        if not started:
+            rest = list(pending)  # sbt died before command 0
+        elif round_failed:
+            # The failures are the last started command's; earlier commands
+            # completed green or sbt would not have advanced past them.
+            rest = pending[max(started) + 1:]
+        else:
+            # sbt/the JVM died inside the last started command with no
+            # parseable failure: re-run that suite too.
+            rest = pending[max(started):]
+        overall_rc = rc
+        if not rest:
+            break  # everything ran; failures are phase 3's problem
+        if len(rest) == len(pending):
+            # No progress. The do-over re-runs everything pending, so this
+            # round's rc gets no say in the result -- unless an earlier round
+            # already logged real failures; those still need phase 3.
+            if do_overs:
+                do_overs -= 1
+                overall_rc = rc if any_failures else 0
+                say(f"{mod}: sbt died before any suite finished; "
+                    f"one whole-batch do-over")
+                continue
+            batch.unrun = list(pending)
+            say(f"{mod}: sbt died twice before any suite finished; giving up")
+            break
+        say(f"{mod}: sbt aborted mid-batch; re-batching {len(rest)} suite(s)")
+        pending = rest
+    return batch, overall_rc, timed_out, logfile
 
 
 # --- environment checks ---------------------------------------------------------
@@ -836,8 +970,37 @@ def main():
         say("=== phase 1: build SKIPPED (--skip-build); jar had better be current ===")
 
     say(f"=== phase 2: {len(items)} suite(s), full runs, keep going on failure ===")
-    suite_results = []  # (item, rc, timed_out, logfile)
+    # Diff-derived scala suites get ONE sbt boot per module, not one per
+    # suite -- a boot is minutes and fast mode can name a handful. sbt aborts
+    # the rest of a multi-command invocation on a failure, so run_scala_batch
+    # re-batches whatever never started. Py items stay one process per module
+    # (isolation), and --all-- module phases stay one boot each.
+    units = []          # ("batch", module) | ("item", it), in plan order
+    scala_groups = {}
     for it in items:
+        if it.kind == "scala" and it.pattern != "--all--":
+            if it.module not in scala_groups:
+                scala_groups[it.module] = []
+                units.append(("batch", it.module))
+            # Repeated CLI specs ('sql/*Foo* sql/*Foo*') would run the suite
+            # twice; the batch gains nothing from a duplicate pattern.
+            if all(g.pattern != it.pattern for g in scala_groups[it.module]):
+                scala_groups[it.module].append(it)
+        else:
+            units.append(("item", it))
+    suite_results = []  # (item, rc, timed_out, logfile)
+    for unit_kind, payload in units:
+        if unit_kind == "batch":
+            group = scala_groups[payload]
+            batch_name = (group[0].name() if len(group) == 1
+                          else f"{payload}/batched-{len(group)}-suites")
+            logfile = logdir / (re.sub(r"[^\w.-]+", "_", batch_name) + ".log")
+            # scala items carry no env_extra; any group member's env will do.
+            env = runner.env_for(group[0], venv_py)
+            suite_results.append(
+                run_scala_batch(runner, payload, group, logfile, env))
+            continue
+        it = payload
         logfile = logdir / (re.sub(r"[^\w.-]+", "_", it.name()) + ".log")
         env = runner.env_for(it, venv_py)
         # A whole module's test phase is hours, not minutes.
@@ -865,6 +1028,9 @@ def main():
     say("=== phase 3: re-run each failed test individually ===")
     flakes, real, not_retried = [], [], []
     for it, rc, timed_out, logfile in suite_results:
+        for p in getattr(it, "unrun", []):
+            not_retried.append((it, f"never finished (batch aborted or "
+                                    f"timed out): {p}", logfile))
         if rc == 0:
             continue
         if it.kind == "scala":
@@ -879,6 +1045,8 @@ def main():
         else:
             failed = parse_py_failures(logfile)
             retry_specs = [(None, f"{mc}.{t}", f"{mc}.{t}") for mc, t in failed]
+        # The combined batch log can name the same test once per round.
+        retry_specs = list(dict.fromkeys(retry_specs))
         if not retry_specs:
             if timed_out:
                 not_retried.append((it, "timed out", logfile))
@@ -912,7 +1080,8 @@ def main():
     lines = [
         f"worktree: {root}  branch: {branch}  base: {base}",
         f"build: {'skipped' if args.skip_build else 'OK'}",
-        f"suites: {len(suite_results)} run, {green} green first try, "
+        f"suites: {len(items)} in {len(suite_results)} run(s), "
+        f"{green} green first try, "
         f"{len(suite_results) - green} needed a second look",
         f"flakes (failed, then passed on retry): {len(flakes)}",
     ]

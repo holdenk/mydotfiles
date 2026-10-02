@@ -94,7 +94,7 @@ from rocksdbjni cannot dlopen `libstdc++.so.6` and you get an
 ## Always fucking run tests
 
 Do not ask first. Wrap builds and tests in
-`bash ~/bin/with-test-lock -- ...` (5 slots under `/tmp/test-lock`;
+`bash ~/bin/with-test-lock -- ...` (6 slots under `/tmp/test-lock`;
 wait if they are all taken; release when done). Rebuild Scala
 (`build/sbt -Phive package`) before Python tests -- drift is real. If you
 touched Scala/Java, run the matching `testOnly` suites, not just Python.
@@ -106,8 +106,10 @@ with `RUN_HYPOTHESIS_MAX_EXAMPLES=200` locally. Details in
 
 Pre-send before pushing a Spark branch:
 `~/bin/spark-presend` from the worktree root (background it,
-it is long). Static checks, lint, then `spark-compile-test-and-retry` for
-tests. Pick the speed yourself -- `--fast` by default, `--modules` for more
+it is long). Static checks, lint (concurrent, lock-free -- linters are
+cheap; the lock bounds test JVM load), then `spark-compile-test-and-retry`
+for tests. A 24h wall-clock cap kills a wedged run, child tree included.
+Pick the speed yourself -- `--fast` by default, `--modules` for more
 complex changes, full (no flag) only when super complex and Holden has not
 said she is in a rush. Do not block on asking her; judge, proceed, and say
 which speed you chose. On a non-busy box (no other PRs in flight, test slots

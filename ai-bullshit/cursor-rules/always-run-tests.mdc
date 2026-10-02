@@ -1,5 +1,5 @@
 ---
-description: Always run tests under /tmp/test-lock (5 slots); rebuild Scala; no ask-first
+description: Always run tests under /tmp/test-lock (6 slots); rebuild Scala; no ask-first
 alwaysApply: true
 ---
 
@@ -9,9 +9,9 @@ Do not ask first. The repo `AGENTS.md` says to ask before running tests on your
 own; this workspace overrides that. Code changed -> tests run -> then you may
 say done. A green you did not produce is not a green.
 
-## Shared lock: 5 slots under `/tmp/test-lock`
+## Shared lock: 6 slots under `/tmp/test-lock`
 
-This box is shared. Builds and tests take a slot. At most ~5 concurrent
+This box is shared. Builds and tests take a slot. At most ~6 concurrent
 holders; otherwise wait until a slot drops. Release when the command exits
 (including failure). `flock`, not mkdir -- a dead process drops the lock.
 
@@ -27,8 +27,8 @@ Do not acquire in one shell and run in another; the wrapper is the holder.
 Backgrounding is fine if the wrapper is the parent (`block_until_ms: 0` /
 `run_in_background` around the wrapper).
 
-If the helper is missing, the protocol is five flock files
-`/tmp/test-lock/slot-{0,1,2,3,4}` -- non-blocking acquire, else wait, then run,
+If the helper is missing, the protocol is six flock files
+`/tmp/test-lock/slot-{0,1,2,3,4,5}` -- non-blocking acquire, else wait, then run,
 then drop the fd.
 
 ## Scala builds. Drift is real.
@@ -47,7 +47,9 @@ coverage for the JVM side.
 the build+test engine (formerly `spark-preflight`). It rebuilds
 (`build/sbt -Phive package`), runs the suites to completion under the test
 lock, then re-runs each failed test individually so flakes and real failures
-are not reported as the same thing. Logs and `summary.txt` land in
+are not reported as the same thing. Diff-derived scala suites share ONE sbt
+boot per module (a boot is minutes), so the log is
+`<module>/batched-N-suites.log`, not one per suite. Logs and `summary.txt` land in
 `target/compile-test-and-retry-logs/<timestamp>/`. Exit 1 = real failures,
 fix before pushing. Exit 0 with flakes listed = pushable, but read the
 flakes.
@@ -116,8 +118,10 @@ required on new confs where the base has the API (4.2+) and an ERROR if a
 backport adds it on an older branch -- drop the call and the import there,
 dup conf definitions, license headers, commit-subject hygiene, leftover
 debug calls), the repo linters for touched languages plus
-`dev/check-license` under the test lock, then
-`spark-compile-test-and-retry` (failed tests retried individually). The
+`dev/check-license` (concurrent and lock-free -- linters are cheap; the lock
+bounds test JVM load), then
+`spark-compile-test-and-retry` (failed tests retried individually). A 24h
+wall-clock cap kills a wedged run, child tree included. The
 test phase speed follows the policy above (`--fast` by default, `--modules`
 for complex changes, full only when super complex and not in a rush).
 `--dry-run` does the static checks only, `--mima` adds dev/mima.

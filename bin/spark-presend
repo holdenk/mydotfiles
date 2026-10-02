@@ -12,11 +12,15 @@ Three phases, in order, each gated on the previous (override with --force):
               deps-manifest reminders, leftover debug statements.
   2. lint     dev/check-license plus dev/lint-scala / lint-java / lint-python /
               lint-r / lint-js / structured_logging_style.py, for the languages
-              the diff touches, under the shared test lock.
+              the diff touches. Lock-free and concurrent: the test lock bounds
+              test JVM load, and linters are too cheap to queue behind it.
   3. tests    spark-compile-test-and-retry --base <base>: ALL the tests by
               default (every SBT module + every PySpark test module, days),
               with per-failed-test retries (flakes vs real). --modules and
               --fast trade coverage for time.
+
+The whole run has a 24h wall-clock cap (--max-wall-hours): a presend that
+old is wedged, not thorough, and it gets killed, child tree included.
 
 Base branch resolution, first hit wins: --base arg, the open PR for this
 branch on apache/spark (gh), a version embedded in the branch name that
@@ -39,13 +43,14 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 # Siblings in the same dir as this script (resolves through the ~/bin
 # symlink to the mydotfiles checkout), so moving the repo never stales these.
 _HERE = Path(__file__).resolve().parent
-LOCK_HELPER = str(_HERE / "with-test-lock")
 TEST_RUNNER = str(_HERE / "spark-compile-test-and-retry")
 # One source of truth for the base branch -- see detect_base().
 BASE_HELPER = str(_HERE / "rebase_update.sh")
@@ -86,6 +91,88 @@ def say(msg):
 def die(msg, code=2):
     say(f"FATAL: {msg}")
     sys.exit(code)
+
+
+# --- wall-clock cap ------------------------------------------------------------
+# A presend that has run for a day is wedged, not thorough. The watchdog kills
+# the whole child TREE (not just the process group): the test phase's suites
+# run in their own sessions, so a group kill would leave an in-flight suite
+# orphaned and still holding its test-lock slot.
+
+_CHILDREN = []
+_CHILDREN_LOCK = threading.Lock()
+
+
+def track_child(p):
+    with _CHILDREN_LOCK:
+        _CHILDREN.append(p)
+
+
+def untrack_child(p):
+    with _CHILDREN_LOCK:
+        if p in _CHILDREN:
+            _CHILDREN.remove(p)
+
+
+def kill_tree(pid):
+    """SIGKILL pid and every descendant, found by walking /proc (no psutil on
+    every box). Session-hopping children are still someone's child
+    (start_new_session setsids without forking, so the ppid chain survives),
+    which is what killpg cannot reach. What this cannot reach: a grandchild
+    that forked and reparented to init before the walk (a setsid(1) daemon).
+    Nothing in the presend tree does that, and such a leftover holds no lock
+    slot -- it is leftover load, not lock crowding."""
+    kids = {}
+    for d in Path("/proc").iterdir():
+        if not d.name.isdigit():
+            continue
+        try:
+            # comm is parenthesized and may contain spaces; ppid is the first
+            # field after the state letter that follows the closing paren.
+            stat = (d / "stat").read_text()
+            ppid = int(stat.rsplit(")", 1)[1].split()[1])
+            kids.setdefault(ppid, []).append(int(d.name))
+        except (OSError, IndexError, ValueError):
+            continue
+    stack, order = [pid], []
+    while stack:
+        p = stack.pop()
+        order.append(p)
+        stack.extend(kids.get(p, []))
+    for p in order:
+        try:
+            os.kill(p, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+# Best-effort cleanups the watchdog runs before os._exit (which skips
+# finally-blocks). Registered by phases that mutate worktree state, e.g. the
+# lint phase's .rat-excludes append -- a day-old run is no excuse for
+# leaving the worktree dirty.
+_CLEANUPS = []
+
+
+def wall_watchdog(hours):
+    time.sleep(hours * 3600)
+    say(f"FATAL: spark-presend has run for {hours:.4g}h -- that is wedged, "
+        "not thorough. Killing the run; the logs up to here stand.")
+    with _CHILDREN_LOCK:
+        # poll() filter: a child that already exited keeps its Popen here
+        # until the finally untracks it, and its pid may already be reused
+        # by someone else's build on this shared box.
+        kids = [p for p in _CHILDREN if p.poll() is None]
+    for p in kids:
+        kill_tree(p.pid)
+    for cleanup in _CLEANUPS:
+        try:
+            cleanup()
+        except Exception:
+            pass
+    # _exit, not sys.exit: the main thread is blocked in a wait that the
+    # kills above are about to make returnable, and the phase finally-blocks
+    # do not get a say in a day-old run.
+    os._exit(124)
 
 
 def report(level, msg):
@@ -485,6 +572,11 @@ def check_debug_leftovers(added):
 # --- lint phase ----------------------------------------------------------------
 
 class LintRunner:
+    """Runs the repo linters. Deliberately NOT under the test lock: the lock
+    exists to bound concurrent test JVMs so suites don't time out under load,
+    and linters are short and cheap by comparison. Taking a slot for lint just
+    queues a real build behind a ruff run."""
+
     def __init__(self, root, logdir):
         self.root = root
         self.logdir = logdir
@@ -495,37 +587,37 @@ class LintRunner:
                          "SPARK_LOCAL_HOSTNAME": "localhost"})
 
     def run(self, name, cmd, timeout_min=60, cwd=None):
+        """Returns (rc, logfile, output). The caller prints the output, so
+        parallel jobs don't interleave on stdout."""
         logfile = self.logdir / f"lint-{name}.log"
-        full = ["bash", LOCK_HELPER, "--"] + cmd \
-            if os.path.exists(LOCK_HELPER) else cmd
         say(f"+ {' '.join(cmd)}   [log: {logfile}]")
         with open(logfile, "a") as lf:
             lf.write(f"$ {' '.join(cmd)}\n")
-            p = subprocess.Popen(full, cwd=cwd or self.root, env=self.env,
+            p = subprocess.Popen(cmd, cwd=cwd or self.root, env=self.env,
                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                  text=True, start_new_session=True)
+            track_child(p)
             try:
                 out, _ = p.communicate(timeout=timeout_min * 60)
             except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(p.pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
+                kill_tree(p.pid)
                 try:
                     out, _ = p.communicate(timeout=60)
                 except subprocess.TimeoutExpired:
                     out = ""
                 say(f"TIMEOUT: lint-{name} after {timeout_min}min")
                 lf.write(out or "")
-                return 124, logfile
-            sys.stdout.write(out or "")
+                return 124, logfile, out
+            finally:
+                untrack_child(p)
             lf.write(out or "")
-        return p.returncode, logfile
+        return p.returncode, logfile, out
 
 
 def lint_phase(root, logdir, files, changed_py, skip_lint):
     """Run the repo's own linters for the languages the diff touches, plus
-    RAT (dev/check-license), which CI runs on every PR."""
+    RAT (dev/check-license), which CI runs on every PR. Concurrent and
+    outside the test lock -- see LintRunner for why."""
     touched = {Path(f).suffix for f in files}
     # Jobs are (name, cmd, cwd-subdir). cwd-subdir is relative to root, None
     # means root. structured_logging_style.py on pre-master branches globs
@@ -567,42 +659,61 @@ def lint_phase(root, logdir, files, changed_py, skip_lint):
         original_excludes = excludes.read_bytes()
         with open(excludes, "ab") as ef:
             ef.write(b".git\n")
+        # Idempotent, so leaving it registered after the finally restores is
+        # fine; it only matters if the watchdog fires mid-lint.
+        _CLEANUPS.append(lambda: excludes.write_bytes(original_excludes))
 
     runner = LintRunner(root, logdir)
     ok = True
     try:
-        for name, cmd, jobcwd in jobs:
-            rc, logfile = runner.run(name, cmd,
-                                     cwd=str(Path(root) / jobcwd) if jobcwd else None)
-            if rc == 0:
-                say(f"lint-{name}: OK")
-                continue
-            if name == "python":
-                # lint-python is fail-fast per stage (compile -> custom-errors ->
-                # ruff -> mypy), so mypy errors in the log mean the earlier
-                # stages passed. Local mypy has ~11 pre-existing pandas-stubs
-                # drift errors; only fail when an error lands in a file this
-                # diff touched.
-                errs = re.findall(r"^(\S+\.py):\d+: error:",
-                                  Path(logfile).read_text(errors="replace"),
-                                  flags=re.M)
-                # mypy is invoked on python/... from the repo root, so paths
-                # in the log are repo-relative; the endswith covers either
-                # layout.
-                mine = [e for e in errs
-                        if any(c == e or c.endswith("/" + e)
-                               for c in changed_py)]
-                if errs and not mine:
-                    report("warn", f"lint-python failed but all {len(errs)} "
-                                   "mypy errors are in files this diff does "
-                                   "not touch (known pandas-stubs drift); "
-                                   "not blocking")
-                    continue
-            report("error", f"lint-{name} FAILED (rc={rc}); see {logfile}")
-            ok = False
+        # The jobs are independent and cheap, so run them concurrently; each
+        # still gets its own 60min timeout and log. outs stays in job order,
+        # so the report below is deterministic.
+        with ThreadPoolExecutor(max_workers=len(jobs)) as ex:
+            futs = [ex.submit(runner.run, name, cmd,
+                              cwd=str(Path(root) / jobcwd) if jobcwd else None)
+                    for name, cmd, jobcwd in jobs]
+            outs = []
+            for f, (name, _, _) in zip(futs, jobs):
+                try:
+                    outs.append(f.result())
+                except Exception as e:
+                    # A linter that will not even start is a RED with a
+                    # message, not a traceback that hides the other jobs.
+                    outs.append((127, logdir / f"lint-{name}.log",
+                                 f"lint-{name} failed to start: {e}\n"))
     finally:
         if original_excludes is not None:
             excludes.write_bytes(original_excludes)
+    for (name, _, _), (rc, logfile, out) in zip(jobs, outs):
+        if out:
+            sys.stdout.write(out)
+        if rc == 0:
+            say(f"lint-{name}: OK")
+            continue
+        if name == "python":
+            # lint-python is fail-fast per stage (compile -> custom-errors ->
+            # ruff -> mypy), so mypy errors in the log mean the earlier
+            # stages passed. Local mypy has ~11 pre-existing pandas-stubs
+            # drift errors; only fail when an error lands in a file this
+            # diff touched.
+            errs = re.findall(r"^(\S+\.py):\d+: error:",
+                              Path(logfile).read_text(errors="replace"),
+                              flags=re.M)
+            # mypy is invoked on python/... from the repo root, so paths
+            # in the log are repo-relative; the endswith covers either
+            # layout.
+            mine = [e for e in errs
+                    if any(c == e or c.endswith("/" + e)
+                           for c in changed_py)]
+            if errs and not mine:
+                report("warn", f"lint-python failed but all {len(errs)} "
+                               "mypy errors are in files this diff does "
+                               "not touch (known pandas-stubs drift); "
+                               "not blocking")
+                continue
+        report("error", f"lint-{name} FAILED (rc={rc}); see {logfile}")
+        ok = False
     return ok
 
 
@@ -634,6 +745,9 @@ def main():
                     help="run later phases even if an earlier phase is red")
     ap.add_argument("--dry-run", action="store_true",
                     help="resolve base and run static checks only")
+    ap.add_argument("--max-wall-hours", type=float, default=24, metavar="H",
+                    help="kill the whole run after H hours (default 24; a "
+                         "presend that old is wedged, not thorough). 0 disables")
     args = ap.parse_args()
 
     root = subprocess.run(["git", "rev-parse", "--show-toplevel"],
@@ -643,6 +757,10 @@ def main():
     root = root.stdout.strip()
     if not (Path(root) / "project" / "SparkBuild.scala").exists():
         die(f"{root} does not look like a Spark worktree")
+
+    if args.max_wall_hours > 0:
+        threading.Thread(target=wall_watchdog,
+                         args=(args.max_wall_hours,), daemon=True).start()
 
     base = detect_base(root, args.base)
     if git(root, "remote", "get-url", "upstream", check=False).returncode == 0:
@@ -697,8 +815,10 @@ def main():
     changed_py = [f for f in files if f.endswith(".py")]
     lint_ok = lint_phase(root, logdir, files, changed_py, args.skip_lint)
     if args.mima:
-        rc, logfile = LintRunner(root, logdir).run("mima", ["./dev/mima"],
-                                                   timeout_min=120)
+        rc, logfile, out = LintRunner(root, logdir).run("mima", ["./dev/mima"],
+                                                        timeout_min=120)
+        if out:
+            sys.stdout.write(out)
         if rc != 0:
             report("error", f"dev/mima FAILED; see {logfile} -- add excludes "
                             "to project/MimaExcludes.scala or drop the "
@@ -728,7 +848,22 @@ def main():
         if args.skip_build:
             cmd.append("--skip-build")
         say(f"=== phase 3: tests: {' '.join(cmd)} ===")
-        rc = subprocess.run(cmd, cwd=root).returncode
+        # Tracked + own session: the wall-clock watchdog can then kill the
+        # whole tree (kill_tree walks /proc) without touching the caller's
+        # process group.
+        p = subprocess.Popen(cmd, cwd=root, start_new_session=True)
+        track_child(p)
+        try:
+            rc = p.wait()
+        except KeyboardInterrupt:
+            # Own session means Ctrl-C no longer reaches the runner; kill
+            # its tree ourselves or a multi-day test run outlives us (and
+            # keeps its test-lock slot).
+            kill_tree(p.pid)
+            p.wait()
+            raise
+        finally:
+            untrack_child(p)
         if rc != 0:
             say(f"RESULT: RED (tests, spark-compile-test-and-retry rc={rc})")
             return 4  # 2/3 are taken by the static/lint phases
