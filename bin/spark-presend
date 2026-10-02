@@ -585,6 +585,13 @@ class LintRunner:
             self.env.pop(k, None)
         self.env.update({"SPARK_LOCAL_IP": "127.0.0.1",
                          "SPARK_LOCAL_HOSTNAME": "localhost"})
+        # dev/lint-python falls back to bare python3/mypy/ruff on PATH, so
+        # point it at the worktree venv: the linters must run against the
+        # interpreter the tests use, not the system python.
+        venv_bin = Path(root) / ".venv" / "bin"
+        if (venv_bin / "python").exists():
+            self.env.setdefault("PYTHON_EXECUTABLE", str(venv_bin / "python"))
+            self.env["PATH"] = f"{venv_bin}:{self.env['PATH']}"
 
     def run(self, name, cmd, timeout_min=60, cwd=None):
         """Returns (rc, logfile, output). The caller prints the output, so
