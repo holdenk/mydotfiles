@@ -6,33 +6,43 @@ Run from anywhere inside a Spark worktree. Rebuilds the JVM side, runs the
 suites to completion, then re-runs each failed test on its own so flakes and
 real failures don't get reported as the same thing.
 
-Three speeds:
-  default    ALL the tests: every SBT module's full test phase plus every
-             PySpark test module. Days. This is the pre-push bar.
-  --modules  every suite in every module the diff touches (hours)
-  --fast     only the suites derived from the diff, for when Holden said
-             she is in a hurry
+What to run comes from the branch's own dev/sparktestsupport/modules.py, the
+module graph, goals and -P profiles CI and dev/run-tests plan from, so it is
+right on every branch. Four speeds:
+  default       what PR CI runs: every module the diff touches plus every
+                module depending on one, full suites. A core or build change
+                maps to everything. Hours to days.
+  --everything  every SBT module and every PySpark goal, doctests included.
+                Days.
+  --modules     every suite in the modules the diff touches (hours)
+  --fast        only the suites derived from the diff, for when Holden said
+                she is in a hurry
 Explicit suite specs override the speed flags.
 
-Diff-derived scala suites run batched per module -- one sbt boot for the
-module's suites, not one per suite (a boot is minutes). sbt aborts the rest
-of a multi-command invocation on a failure, so never-started suites get
-re-batched; failed tests are still retried individually afterwards.
+One sbt at a time per worktree: two race on compile output. Whole-module runs
+share ONE `sbt all a/test b/test ...`, which runs modules concurrently up to
+SparkBuild's 4 forked test JVMs. Diff-derived suites share one sbt boot per
+module; sbt aborts the rest of a multi-command invocation on a failure, so
+never-started suites get re-batched. PySpark modules spread over up to --jobs
+lanes: lane 1 always runs, extra lanes only start a test while the test lock
+has 2+ free slots, and every test takes and drops its own slot.
 
 Semi-resilient: a failing suite does not stop the run, a crashed SBT gets
 one do-over, and everything lands in target/compile-test-and-retry-logs/<ts>/.
-Each failed test is retried exactly ONCE. Fails twice -> real failure, and
-there is no flag to re-roll it further: something that flakes twice is
-something to look at.
+Each failed test is retried exactly ONCE (scala retries batched per module).
+Fails twice -> real failure, and there is no flag to re-roll it further:
+something that flakes twice is something to look at.
 
 Not done on purpose: scalastyle/lint, R, docs build, MIMA (spark-presend
 covers lint; the rest is CI's job). If the diff is doc-only the script says
 so and exits 0 -- that is the intended exemption, in every speed.
 
 Usage:
-  spark-compile-test-and-retry                    # build + ALL the tests
+  spark-compile-test-and-retry                    # build + what PR CI runs
+  spark-compile-test-and-retry --everything       # build + ALL the tests
   spark-compile-test-and-retry --fast             # build + diff-derived suites
   spark-compile-test-and-retry --modules          # build + touched modules' suites
+  spark-compile-test-and-retry --build-only       # just the build the plan needs
   spark-compile-test-and-retry '*RocksDBSuite*'   # explicit scala suite glob
   spark-compile-test-and-retry sql/'*RocksDBSuite*'  # explicit module + glob
   spark-compile-test-and-retry pyspark.sql.tests.test_udf_transpile_unit
@@ -40,6 +50,7 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import re
 import resource
@@ -61,7 +72,8 @@ JDK_HELPER = str(Path(__file__).resolve().parent / "set_spark_jdk_to_ok")
 DOC_ONLY = re.compile(
     r"(^docs/|^\.github/|^dev/|^LICENSE|^NOTICE|\.md$|\.rst$|\.markdown$)")
 BUILD_FILES = re.compile(r"(^|/)pom\.xml$|^project/|^build\.sbt$|^build/")
-# Known SBT module ids, from BuildCommons in project/SparkBuild.scala. Used to
+# Known SBT module ids, from BuildCommons in project/SparkBuild.scala, plus
+# whatever the branch's modules.py names a test goal for (see load_ci). Used to
 # sanity-check the artifactId-derived guess, not as the source of truth.
 KNOWN_MODULES = {
     "core", "graphx", "mllib", "mllib-local", "repl", "network-common",
@@ -91,6 +103,8 @@ SUITE_ABORT = re.compile(r"^\[info\] ([\w$.]+) \*\*\* ABORTED \*\*\*")
 # for single-suite runs). Its absence on a red run means sbt or the forked
 # JVM died mid-module and every suite after that point never ran.
 TASK_END = re.compile(r"^\[error\] \(\S+ / Test / test(?:Only)?\) ")
+# ...and this when it finishes green. Read from a module's own task log.
+TEST_SUMMARY = re.compile(r"^\[info\] (?:Passed: Total|No tests to run)")
 FAILED_SUITE_LINE = re.compile(r"^\[error\] \t([\w$]+(?:\.[\w$]+)+)\s*$")
 COMPILE_FAIL = re.compile(r"Compilation failed|error compiling")
 PY_FAIL = re.compile(r"^(?:FAIL|ERROR): (\w+) \(([\w.]+)\)")
@@ -98,6 +112,21 @@ PY_FAIL = re.compile(r"^(?:FAIL|ERROR): (\w+) \(([\w.]+)\)")
 # The hypothesis suite is gated: without RUN_HYPOTHESIS=1, 19 of 23 tests
 # skip and the run looks green in ~5s. That is not a green.
 HYPOTHESIS_ENV = {"RUN_HYPOTHESIS": "1", "RUN_HYPOTHESIS_MAX_EXAMPLES": "200"}
+
+# Needs a docker daemon, and CI only enables it on GitHub Actions anyway.
+SKIP_SBT_MODULES = {"docker-integration-tests"}
+
+# python/run-tests' heavy-first order: these prefixes are the long modules.
+HEAVY_PY = ("pyspark.streaming.tests", "pyspark.mllib.tests", "pyspark.tests",
+            "pyspark.sql.tests", "pyspark.ml.tests", "pyspark.pandas.tests")
+
+# An extra lane takes a test only while this many test-lock slots are free.
+HEADROOM = 2
+
+# sbt test runs print at least every 5 minutes while a test runs (SparkBuild's
+# ScalaTest -W 120 300), and a dead forked JVM leaves sbt hung rather than
+# failed (verified by halting one). Silence this long means hung.
+SBT_IDLE = 3600
 
 NOW = time.strftime("%Y%m%d-%H%M%S")
 
@@ -113,14 +142,17 @@ def die(msg, code=2):
 
 class Item:
     """One runnable test unit: a scala suite glob in an SBT module, or a
-    python unittest spec."""
+    python unittest spec / doctest module."""
 
-    def __init__(self, kind, module, pattern, why, env_extra=None):
+    def __init__(self, kind, module, pattern, why, env_extra=None, doctest=False):
         self.kind = kind            # "scala" | "py"
         self.module = module        # sbt module id | n/a for py
         self.pattern = pattern      # testOnly glob | dotted unittest spec
         self.why = why
         self.env_extra = env_extra or {}
+        # A modules.py goal that is not a test_* module: its doctests run as
+        # `python -m <module>`. `-m unittest` would find no TestCase and pass.
+        self.doctest = doctest
         # Batch runs fill this with the suite patterns that never started
         # (abort/timeout), so phase 3 reports them instead of a silent green.
         self.unrun = []
@@ -134,12 +166,17 @@ class Item:
             return f"{self.module}/{self.pattern}"
         return self.pattern
 
-    def cmd(self, root, venv_py):
+    def cmd(self, runner):
+        """Whole-module items have none: they run in run_scala_modules.
+        PySpark goes through bin/pyspark, as python/run-tests does: under
+        SPARK_TESTING it runs `$PYSPARK_DRIVER_PYTHON -m ...` with
+        PYTHONHASHSEED=0 (or every string-hashing doctest dies) and the
+        YARN/Hadoop conf dirs unset."""
         if self.kind == "scala":
-            if self.pattern == "--all--":
-                return ["build/sbt", "-Phive", f"{self.module}/test"]
-            return ["build/sbt", "-Phive", f"{self.module}/testOnly {self.pattern}"]
-        return [venv_py, "-u", "-m", "unittest", self.pattern]
+            return runner.sbt(f"{self.module}/testOnly {self.pattern}")
+        if self.doctest:
+            return ["bin/pyspark", self.pattern]
+        return ["bin/pyspark", "unittest", self.pattern]
 
 
 def find_root():
@@ -162,7 +199,7 @@ def find_venv_python(root):
     return shutil.which("python3") or die("no python found")
 
 
-def scan_modules(root):
+def scan_modules(root, known):
     """Map SBT module id -> module dir, by walking for pom.xml and applying
     the spark-<artifactId>_2.13 -> id rule. Prunes target/.git/.venv."""
     modules = {}
@@ -182,7 +219,7 @@ def scan_modules(root):
         if not m:
             continue
         mod = m.group(1)
-        if mod in KNOWN_MODULES and mod not in modules:
+        if mod in known and mod not in modules:
             modules[mod] = d
     return modules
 
@@ -278,30 +315,137 @@ def py_item(root, tf, why):
     return Item("py", None, py_dotted(root, tf), why, env)
 
 
-def py_spec_item(spec, why):
+def py_spec_item(spec, why, doctest=False):
     """Same for an already-dotted unittest spec (which is not a path, so
     py_item/py_dotted do not apply)."""
     env = HYPOTHESIS_ENV if "hypothesis" in spec else None
-    return Item("py", None, spec, why, env)
+    return Item("py", None, spec, why, env, doctest)
 
 
-def plan_all(root, modules):
-    """Every test we know how to run: each SBT module's full test phase plus
-    every PySpark test module. Days. R and the docs build stay out -- they
-    need toolchains this script does not check, and CI covers them."""
-    items, notes = [], []
-    for mod, d in sorted(modules.items()):
-        if (d / "src" / "test").is_dir():
-            items.append(Item("scala", mod, "--all--", "all modules"))
-        else:
-            notes.append(f"module {mod} has no src/test; skipped")
-    for tf in sorted((Path(root) / "python" / "pyspark").rglob("test_*.py")):
-        if "__pycache__" not in tf.parts:
-            items.append(py_item(root, tf, "all pyspark"))
+def load_ci(root):
+    """The branch's own dev/sparktestsupport -- what CI and dev/run-tests plan
+    from. Same API from branch-3.5 through master."""
+    dev = Path(root) / "dev"
+    if not (dev / "sparktestsupport" / "modules.py").exists():
+        die(f"{dev}/sparktestsupport/modules.py is missing; it is what this "
+            "script plans from")
+    sys.path.insert(0, str(dev))
+    try:
+        import sparktestsupport.modules as ci
+        import sparktestsupport.utils as ci_utils
+    except Exception as e:
+        die(f"cannot import {dev}/sparktestsupport: {e}")
+    return ci, ci_utils
+
+
+def sbt_profiles(ci):
+    """sbt id -> the -P flags CI tests it with. hive-thriftserver, yarn,
+    network-yarn, kubernetes and hadoop-cloud are not sbt projects at all
+    without theirs, so a -Phive-only run cannot even name them."""
+    out = {}
+    for m in ci.all_modules:
+        for g in m.sbt_test_goals:
+            if g.endswith("/test"):
+                out.setdefault(g[:-len("/test")], set()).update(m.build_profile_flags)
+    return out
+
+
+def is_doctest_goal(goal):
+    return not goal.rsplit(".", 1)[-1].startswith("test_")
+
+
+def plan_ci(ci, ci_utils, code, mode):
+    """Whole-module plan from modules.py. mode: "everything", "default" (the
+    touched modules plus their dependents -- CI's own selection) or "modules"
+    (touched only)."""
+    notes = []
+    if mode == "everything":
+        mods = [ci.root]
+    else:
+        mods = ci_utils.determine_modules_for_files(code)
+        if mode == "default":
+            mods = ci_utils.determine_modules_to_test(mods)
+        elif ci.root in mods:
+            notes.append("files no CI module claims (CI would run everything) "
+                         "are skipped by --modules")
+            mods = [m for m in mods if m is not ci.root]
+    if ci.root in mods:
+        mods = [m for m in ci.all_modules if m is not ci.root]
+    sbt, py = {}, {}
+    for m in sorted(mods, key=lambda m: m.name):
+        for g in m.sbt_test_goals:
+            if not g.endswith("/test"):
+                continue
+            mod = g[:-len("/test")]
+            if mod in SKIP_SBT_MODULES:
+                notes.append(f"{mod}: needs docker; not run")
+            else:
+                sbt.setdefault(mod, m.name)
+        for g in m.python_test_goals:
+            py.setdefault(g, m.name)
+    items = [Item("scala", mod, "--all--", why) for mod, why in sbt.items()]
+    items += [py_spec_item(g, why, is_doctest_goal(g)) for g, why in py.items()]
     return items, notes
 
 
-def plan_from_diff(root, modules, files, run_all_modules):
+# The import-graph relevance check Spark's own CI applies on apache/spark
+# pushes (pyspark/testing/utils.py, PYSPARK_CHANGED_FILES), done once up front
+# so an irrelevant module never even launches. Exit 3: no grimp in the venv.
+GRIMP_PRUNE = r"""
+import json, sys
+try:
+    import grimp
+except ImportError:
+    sys.exit(3)
+changed, goals = json.load(sys.stdin)
+graph = grimp.build_graph("pyspark")
+def relevant(m):
+    try:
+        return any(m == c or graph.chain_exists(m, c) for c in changed)
+    except Exception:
+        return True  # not in the graph: run it
+json.dump([m for m in goals if relevant(m)], sys.stdout)
+"""
+
+
+def prune_py_by_imports(root, venv_py, code, items, notes):
+    """Python-only diff: drop the unittest modules that import nothing it
+    touched. PR CI from a fork does not prune, so this runs less than PR CI;
+    --everything keeps them all. Doctest modules always run, as in Spark."""
+    if not all(f.startswith("python/pyspark/") and f.endswith(".py") for f in code):
+        return items
+    goals = [it.pattern for it in items if it.kind == "py" and not it.doctest]
+    if not goals:
+        return items
+    changed = [f[len("python/"):-len(".py")].replace("/", ".").removesuffix(".__init__")
+               for f in code]
+    try:
+        p = subprocess.run([venv_py, "-c", GRIMP_PRUNE], cwd=root,
+                           input=json.dumps([changed, goals]), capture_output=True,
+                           text=True, timeout=900,
+                           env=dict(os.environ, PYTHONPATH=str(Path(root) / "python")))
+    except subprocess.TimeoutExpired:
+        notes.append("import-graph pruning timed out; running every PySpark module")
+        return items
+    if p.returncode == 3:
+        notes.append("no grimp in the venv; not pruning PySpark modules by imports")
+        return items
+    if p.returncode != 0:
+        err = (p.stderr.strip().splitlines() or ["?"])[-1]
+        notes.append(f"import-graph pruning failed ({err}); running them all")
+        return items
+    keep = set(json.loads(p.stdout))
+    notes.append(f"python-only diff: {len(goals) - len(keep)} of {len(goals)} "
+                 "PySpark test modules import nothing it touched; skipped "
+                 "(--everything runs them)")
+    return [it for it in items
+            if it.kind != "py" or it.doctest or it.pattern in keep]
+
+
+def plan_from_diff(root, modules, files, doctests):
+    """--fast: suites derived from the changed files' names. doctests is the
+    set of modules.py doctest goals, so a changed module with doctests runs
+    them too."""
     items, notes = [], []
     seen = {}
 
@@ -319,7 +463,7 @@ def plan_from_diff(root, modules, files, run_all_modules):
         items.append(item)
 
     code = [f for f in files if not DOC_ONLY.search(f)]
-    if any(BUILD_FILES.search(f) for f in files) and not run_all_modules:
+    if any(BUILD_FILES.search(f) for f in files):
         notes.append("build files changed: the build step covers compilation; "
                      "consider --modules if build logic itself changed")
     transpile_touched = any("transpile" in f and f.startswith("python/") for f in code)
@@ -329,9 +473,6 @@ def plan_from_diff(root, modules, files, run_all_modules):
             mod = module_for_path(root, modules, f)
             if mod is None:
                 notes.append(f"no SBT module found for {f}; skipped")
-                continue
-            if run_all_modules:
-                add(Item("scala", mod, "--all--", f))
                 continue
             stem = Path(f).stem
             is_test = "/src/test/" in f
@@ -346,16 +487,10 @@ def plan_from_diff(root, modules, files, run_all_modules):
                 if not is_test:
                     notes.append(f"{f} is not a test; running {len(suites)} name-matched suite(s)")
         elif f.startswith("python/") and f.endswith(".py"):
-            if run_all_modules:
-                parts = Path(f).parts
-                # Touched package = python/pyspark/<pkg>; run every test under it.
-                pkg = Path(*parts[:3]) if len(parts) > 3 else Path("python/pyspark")
-                for tf in sorted((Path(root) / pkg).rglob("test_*.py")):
-                    if "__pycache__" not in tf.parts:
-                        add(py_item(root, tf, f))
-                continue
             mods = discover_py_modules(root, f)
-            if not mods:
+            if py_dotted(root, f) in doctests:
+                add(py_spec_item(py_dotted(root, f), f, doctest=True))
+            elif not mods:
                 notes.append(f"no test_<stem> module found for {f}; skipped")
             for m in mods:
                 # py_spec_item, not a bare Item: m is already dotted, and this
@@ -453,10 +588,13 @@ def resolve_explicit(root, modules, spec):
 # --- execution -------------------------------------------------------------
 
 class Runner:
-    def __init__(self, root, logdir, suite_timeout_min, heap):
+    def __init__(self, root, logdir, suite_timeout_min, heap, profiles, venv_py, echo_py):
         self.root = root
         self.logdir = logdir
         self.timeout = suite_timeout_min * 60
+        self.profiles = profiles
+        self.venv_py = venv_py
+        self.echo_py = echo_py
         self.env = os.environ.copy()
         for k in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"):
             # Empty string is not enough: the guard is keyId != null. Genuinely unset.
@@ -469,70 +607,113 @@ class Runner:
         })
         if heap:
             self.env["HEAP_SIZE"] = heap
-        self.current_proc = None
+        # Before any per-test TMPDIR: unix socket paths cap near 108 chars, so
+        # they stay off the deep per-test dirs (python/run-tests does the same).
+        self.sock_dir = os.environ.get("TMPDIR") or "/tmp"
+        self.py_tmp = logdir / "py-tmp"
+        self.procs = set()
+        self.procs_lock = threading.Lock()
 
-    def env_for(self, item, venv_py):
+    def sbt(self, *cmds):
+        return ["build/sbt", *self.profiles, *cmds]
+
+    def env_for(self, item):
+        """(env, per-test tmp dir or None). PySpark gets python/run-tests'
+        isolation, which is what makes its --parallelism safe and so the
+        lanes here: own TMPDIR, java.io.tmpdir and warehouse dir."""
         env = dict(self.env)
         env.update(item.env_extra)
-        if item.kind == "py":
-            local_dirs = Path(self.root) / "target" / "local-dirs"
-            local_dirs.mkdir(parents=True, exist_ok=True)
-            env.update({
-                "PYTHONPATH": str(Path(self.root) / "python"),
-                "PYSPARK_PYTHON": venv_py,
-                "PYSPARK_DRIVER_PYTHON": venv_py,
-                # Keep RocksDB SST/changelog IO on the worktree disk, not the
-                # shared 50G /tmp loop device.
-                "SPARK_LOCAL_DIRS": str(local_dirs),
-            })
-        return env
+        if item.kind != "py":
+            return env, None
+        self.py_tmp.mkdir(parents=True, exist_ok=True)
+        tmp = Path(tempfile.mkdtemp(dir=self.py_tmp))
+        java = f"-Djava.io.tmpdir={tmp} -Xss4M"
+        log4j = Path(self.root) / "python" / "test_support" / "log4j2.properties"
+        if log4j.exists():
+            java += f" -Dlog4j.configurationFile={log4j}"
+        env.update({
+            "PYTHONPATH": str(Path(self.root) / "python"),
+            "PYSPARK_PYTHON": self.venv_py,
+            "PYSPARK_DRIVER_PYTHON": self.venv_py,
+            "PYTHONUNBUFFERED": "1",
+            # Tests that shell out to a bare `python` must get this one.
+            "PATH": f"{Path(self.venv_py).parent}:{self.env['PATH']}",
+            "TMPDIR": str(tmp),
+            # Keep RocksDB SST/changelog IO on the worktree disk, not the
+            # shared 50G /tmp loop device.
+            "SPARK_LOCAL_DIRS": str(tmp),
+            "PYSPARK_SUBMIT_ARGS": " ".join([
+                "--conf", f"spark.driver.extraJavaOptions='{java}'",
+                "--conf", f"spark.executor.extraJavaOptions='{java}'",
+                "--conf", f"spark.sql.warehouse.dir='{tmp / 'warehouse'}'",
+                "--conf", f"spark.python.unix.domain.socket.dir={self.sock_dir}",
+                "pyspark-shell"]),
+        })
+        return env, tmp
 
-    def run(self, cmd, logfile, env, timeout=None):
-        """Run cmd under the shared lock, stream output to stdout AND logfile
-        (never pipe through tail/grep: a hung job must look hung)."""
+    def run(self, cmd, logfile, env, timeout=None, echo=True, idle=None):
+        """Run cmd under the shared lock, output to logfile and, with echo, to
+        stdout (never pipe through tail/grep: a hung job must look hung).
+        idle kills a run silent that long once it holds its slot."""
         timeout = timeout or self.timeout
         # env_checks has already verified LOCK_HELPER exists.
         full = [LOCK_HELPER, "--"] + cmd
         say("+ " + " ".join(cmd) + f"   [log: {logfile}]")
         finished = threading.Event()
-        timed_out = False
+        why = []
+        last = [None]  # last output time; None while still queued for a slot
         with open(logfile, "a") as lf:
             lf.write(f"$ {' '.join(cmd)}\n")
             p = subprocess.Popen(
                 full, cwd=self.root, env=env, stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, text=True, bufsize=1,
                 start_new_session=True)
-            self.current_proc = p
+            with self.procs_lock:
+                self.procs.add(p)
 
             def watchdog():
-                nonlocal timed_out
-                if not finished.wait(timeout):
-                    timed_out = True
+                deadline = time.time() + timeout
+                while not finished.wait(30):
+                    if time.time() > deadline:
+                        why.append(f"after {timeout // 60}min")
+                    elif idle and last[0] and time.time() - last[0] > idle:
+                        why.append(f"silent for {idle // 60}min")
+                    else:
+                        continue
                     try:
                         os.killpg(p.pid, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
+                    return
 
             t = threading.Thread(target=watchdog, daemon=True)
             t.start()
             try:
                 for line in p.stdout:
-                    sys.stdout.write(line)
-                    sys.stdout.flush()
+                    if last[0] or line.startswith("with-test-lock: got slot"):
+                        last[0] = time.time()
+                    if echo:
+                        sys.stdout.write(line)
+                        sys.stdout.flush()
                     lf.write(line)
                 rc = p.wait()
             finally:
                 finished.set()
-                self.current_proc = None
-        if timed_out:
-            say(f"TIMEOUT after {timeout // 60}min: {' '.join(cmd)}")
+                with self.procs_lock:
+                    self.procs.discard(p)
+        if why:
+            say(f"TIMEOUT ({why[0]}): {' '.join(cmd)}")
             return -signal.SIGKILL, True
+        if not echo:
+            say(f"{'ok' if rc == 0 else f'rc={rc}'}: {logfile.name}")
         return rc, False
 
-    def kill_current(self):
-        if self.current_proc is not None:
+    def kill_all(self):
+        with self.procs_lock:
+            procs = list(self.procs)
+        for p in procs:
             try:
-                os.killpg(self.current_proc.pid, signal.SIGKILL)
+                os.killpg(p.pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 pass
 
@@ -624,27 +805,27 @@ def started_commands(logfile):
     return out
 
 
-def run_scala_batch(runner, mod, group, logfile, env):
-    """Run a module's diff-derived (or explicit-spec) suites as ONE sbt
-    invocation instead of one boot per suite (a boot is minutes; a fast-mode
-    diff can name a handful).
+def run_scala_batch(runner, mod, patterns, logfile, env, retry=False):
+    """Run a module's testOnly patterns as ONE sbt invocation instead of one
+    boot per suite (a boot is minutes; a fast-mode diff can name a handful,
+    and phase 3 has one pattern per failed test).
 
     sbt aborts the remaining commands when one fails (verified: marker after
     a failing command never prints, exit rc 1), so a failing suite would
     silently skip the rest of the batch. Markers make the abort point exact:
     sbt only advances past a command that succeeded, so every command before
-    the last started one completed green, any parsed failure belongs to the
-    last started one (phase 3 retries those individually from the combined
-    log, same as a standalone suite), and everything after it never ran and
-    gets re-batched. A round with no progress at all means sbt itself died:
-    one whole-batch do-over, same as the single-suite rule.
+    the last started one completed green, the last started one failed, and
+    everything after it never ran and gets re-batched. A round with no
+    progress at all means sbt itself died: one whole-batch do-over, same as
+    the single-suite rule. A command that died with no parseable failure (sbt
+    or its JVM crashed) runs again -- unless this is a retry, which gets
+    exactly one go.
+
+    Returns ({pattern: "ok" | "failed" | "unrun"}, timed_out).
     """
-    batch = Item("scala", mod,
-                 group[0].pattern if len(group) == 1 else "--batch--",
-                 f"{len(group)} diff-derived suite(s) in {mod}")
-    pending = [it.pattern for it in group]
-    overall_rc, timed_out, do_overs, marker_base = 0, False, 1, 0
-    any_failures = False
+    status = {}
+    pending = list(dict.fromkeys(patterns))
+    timed_out, do_overs, marker_base = False, 1, 0
     while pending:
         cmds = []
         for i, p in enumerate(pending):
@@ -653,8 +834,8 @@ def run_scala_batch(runner, mod, group, logfile, env):
         # Per-suite timeout times the batch size, capped like a module run.
         timeout = min(len(pending) * runner.timeout, 8 * 3600)
         log_pos = os.path.getsize(logfile) if os.path.exists(logfile) else 0
-        rc, timed_out = runner.run(["build/sbt", "-Phive", *cmds],
-                                   logfile, env, timeout=timeout)
+        rc, timed_out = runner.run(runner.sbt(*cmds), logfile, env,
+                                   timeout=timeout, idle=SBT_IDLE)
         # Marker indices are unique across rounds via marker_base; the range
         # check rejects a test that prints a marker-shaped line. The log
         # accumulates every round's output for phase 3's failure parsing,
@@ -665,54 +846,148 @@ def run_scala_batch(runner, mod, group, logfile, env):
                    if marker_base <= k < marker_base + len(pending)}
         marker_base += len(pending)
         if rc == 0:
-            # overall_rc, not 0: an earlier round's failures still need phase
-            # 3's retries, and it skips entries whose rc is 0.
-            return batch, overall_rc, False
+            status.update(dict.fromkeys(pending, "ok"))
+            break
+        last = max(started) if started else None
+        if last is not None:
+            status.update(dict.fromkeys(pending[:last], "ok"))
         failed, suite_level, compile_failed = parse_scala_failures(
             logfile, start=log_pos)
-        round_failed = bool(failed or suite_level)
-        any_failures = any_failures or round_failed
-        if compile_failed:
-            overall_rc = rc
-            say(f"{mod}: compile failed; not re-batching")
+        if compile_failed or timed_out:
+            # Nothing after a compile failure runs, and a timed-out suite's
+            # results are partial at best: phase 3 reports them either way,
+            # never a silent green.
+            state = "failed" if compile_failed else "unrun"
+            status.update(dict.fromkeys(pending[last or 0:], state))
+            say(f"{mod}: {'compile failed' if compile_failed else 'timed out'}; "
+                "not re-batching")
             break
-        if timed_out:
-            # The interrupted suite's results are partial at best; it and
-            # everything after it count as unrun so phase 3 reports them
-            # instead of a silent green.
-            overall_rc = rc
-            batch.unrun = pending[max(started):] if started else list(pending)
-            say(f"{mod}: batch timed out; unrun: {batch.unrun}")
-            break
-        if not started:
+        if last is None:
             rest = list(pending)  # sbt died before command 0
-        elif round_failed:
-            # The failures are the last started command's; earlier commands
-            # completed green or sbt would not have advanced past them.
-            rest = pending[max(started) + 1:]
+        elif failed or suite_level or retry:
+            status[pending[last]] = "failed"
+            rest = pending[last + 1:]
         else:
-            # sbt/the JVM died inside the last started command with no
-            # parseable failure: re-run that suite too.
-            rest = pending[max(started):]
-        overall_rc = rc
+            rest = pending[last:]
         if not rest:
-            break  # everything ran; failures are phase 3's problem
+            break
         if len(rest) == len(pending):
-            # No progress. The do-over re-runs everything pending, so this
-            # round's rc gets no say in the result -- unless an earlier round
-            # already logged real failures; those still need phase 3.
             if do_overs:
                 do_overs -= 1
-                overall_rc = rc if any_failures else 0
                 say(f"{mod}: sbt died before any suite finished; "
                     f"one whole-batch do-over")
                 continue
-            batch.unrun = list(pending)
+            status.update(dict.fromkeys(pending, "unrun"))
             say(f"{mod}: sbt died twice before any suite finished; giving up")
             break
         say(f"{mod}: sbt aborted mid-batch; re-batching {len(rest)} suite(s)")
         pending = rest
-    return batch, overall_rc, timed_out
+    return status, timed_out
+
+
+def module_task_log(moddir):
+    """sbt's own log of a module's test task. `all` interleaves modules on the
+    console; this file holds the one module's output, task-end line included
+    (verified), so the single-module parsers work on it unchanged."""
+    return (Path(moddir) / "target" / "streams" / "test" / "test" / "_global"
+            / "streams" / "out")
+
+
+def run_scala_modules(runner, modules, items, logdir, env):
+    """Whole test phases in ONE sbt process: `all a/test b/test ...` runs the
+    modules concurrently, capped by SparkBuild's 4 forked test JVMs -- the cap
+    one hive/test already hits alone, so a slot's peak load does not move.
+
+    Verdicts come from each module's task log, copied into logdir: the task-end
+    line means it finished red, sbt's Passed/No-tests summary green. Neither
+    after sbt died gets one do-over, all such modules in one more `all`. Neither
+    after a timeout -- including the idle kill that ends the hang a dead forked
+    JVM leaves, which fires only once every other module has gone quiet --
+    means never finished, as a timed-out module always did.
+    Returns [(item, rc, timed_out, logfile)], like the other runs."""
+    out, pending = [], list(items)
+    for attempt in (1, 2):
+        start = time.time()
+        console = logdir / f"sbt-all-modules{'-do-over' if attempt == 2 else ''}.log"
+        # A module run gets 8h, as before; four run at a time.
+        timeout = min(8 * 3600 * -(-len(pending) // 4), 24 * 3600)
+        rc, timed_out = runner.run(
+            runner.sbt("all " + " ".join(f"{it.module}/test" for it in pending)),
+            console, env, timeout=timeout, idle=SBT_IDLE)
+        compile_failed = parse_scala_failures(console)[2]
+        unknown = []
+        for it in pending:
+            src = module_task_log(modules[it.module])
+            log = logdir / f"{it.module}-tests.log"
+            fresh = src.exists() and src.stat().st_mtime >= start
+            if fresh:
+                shutil.copyfile(src, log)
+            lines = log.read_text(errors="replace").splitlines() if fresh else []
+            if any(TASK_END.match(l) for l in lines):
+                out.append((it, 1, False, log))
+            elif rc == 0 or any(TEST_SUMMARY.match(l) for l in lines):
+                out.append((it, 0, False, log if fresh else console))
+            elif compile_failed:
+                out.append((it, rc, False, console))  # phase 3 reports it
+            elif timed_out or attempt == 2:
+                it.unrun = ["its test phase ("
+                            + ("timed out" if timed_out else "no verdict twice") + ")"]
+                out.append((it, 0, timed_out, console))
+            else:
+                unknown.append(it)
+        if not unknown:
+            break
+        say(f"no verdict from sbt for {[it.module for it in unknown]}; one do-over")
+        pending = unknown
+    return out
+
+
+def free_slots():
+    try:
+        return int(subprocess.run([LOCK_HELPER, "--free"], capture_output=True,
+                                  text=True, timeout=60).stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return 0
+
+
+def run_lanes(units, jobs):
+    """Run units, [(priority, fn)], on up to `jobs` threads, lowest priority
+    first; returns the fn() results in unit order. Lane 1 always works (each
+    run still queues in with-test-lock like anyone's). Extra lanes take a unit
+    only while the lock has HEADROOM free slots, so a quiet box gets the
+    parallelism and a busy one gets a single lane."""
+    todo = sorted(range(len(units)), key=lambda i: units[i][0])
+    results = [None] * len(units)
+    mu = threading.Lock()
+
+    def lane(extra):
+        while True:
+            if extra and free_slots() < HEADROOM:
+                with mu:
+                    if not todo:
+                        return
+                time.sleep(30)
+                continue
+            with mu:
+                if not todo:
+                    return
+                i = todo.pop(0)
+            try:
+                results[i] = units[i][1]()
+            except BaseException as e:  # re-raised below, on the main thread
+                results[i] = e
+
+    threads = [threading.Thread(target=lane, args=(n > 0,), daemon=True)
+               for n in range(max(1, min(jobs, len(units))))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        while t.is_alive():
+            t.join(1)  # a bare join() would sit out a Ctrl-C
+    for r in results:
+        if isinstance(r, BaseException):
+            raise r
+    return results
 
 
 # --- environment checks ---------------------------------------------------------
@@ -870,19 +1145,22 @@ def env_checks(root, venv_py, need_py):
             "lock is what keeps concurrent test JVMs from timing each other "
             "out on this shared box; running unlocked is not a fallback.")
     # RocksDB JNI extracts librocksdbjni.so into java.io.tmpdir and execs it.
-    # For PySpark-launched JVMs that is /tmp (verified: TMPDIR does not move
-    # java.io.tmpdir), so a noexec /tmp is a hard fail, not a surprise later.
+    # That is under <root>/target for every test JVM here: SparkBuild's
+    # testTempDir for SBT suites, Runner.env_for's per-test dirs for PySpark.
+    # So a noexec worktree disk is a hard fail, not a surprise later.
     # mkstemp, not a fixed name: two concurrent runs must not unlink each
     # other's probe mid-exec.
-    fd, probe = tempfile.mkstemp(dir="/tmp", prefix=".ctar-exec-check-")
+    tmp = Path(root) / "target" / "tmp"
+    tmp.mkdir(parents=True, exist_ok=True)
+    fd, probe = tempfile.mkstemp(dir=tmp, prefix=".ctar-exec-check-")
     try:
         with os.fdopen(fd, "w") as pf:
             pf.write("#!/bin/sh\nexit 0\n")
         os.chmod(probe, 0o700)
         if subprocess.run([probe], capture_output=True).returncode != 0:
-            die("/tmp exists but failed to exec a probe script")
+            die(f"{tmp} exists but failed to exec a probe script")
     except OSError as e:
-        die(f"/tmp is noexec or broken ({e}); RocksDB native loading will fail")
+        die(f"{tmp} is noexec or broken ({e}); RocksDB native loading will fail")
     finally:
         Path(probe).unlink(missing_ok=True)
     # InetAddress.getLocalHost() must return a usable address: whatever calls
@@ -932,10 +1210,23 @@ def env_checks(root, venv_py, need_py):
             "confuse ps output):")
         for l in orphans[:5]:
             say(f"  {l.strip()}")
-    (Path(root) / "target" / "tmp").mkdir(parents=True, exist_ok=True)
     # JAVA_HOME, not PATH's java: sbt follows the former (build/sbt-launch-lib).
     say(f"env ok: java={java_ver} at {java_home}")
     say(f"env ok: python={venv_py}")
+
+
+def safe_name(s):
+    return re.sub(r"[^\w.-]+", "_", s)
+
+
+def run_py(runner, it, logfile):
+    """One PySpark module (or a retry spec, as an Item). The per-test tmp dir
+    goes on success and stays on failure, next to the logs."""
+    env, tmp = runner.env_for(it)
+    rc, timed_out = runner.run(it.cmd(runner), logfile, env, echo=runner.echo_py)
+    if rc == 0:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return rc, timed_out
 
 
 def main():
@@ -950,14 +1241,24 @@ def main():
     speed = ap.add_mutually_exclusive_group()
     speed.add_argument("--fast", action="store_true",
                        help="only the suites derived from the diff, for when "
-                            "in a hurry; the default is ALL the tests (days)")
+                            "in a hurry; the default is what PR CI runs")
     speed.add_argument("--modules", action="store_true",
                        help="all suites in every module the diff touches "
                             "(hours); the middle speed")
-    ap.add_argument("--skip-build", action="store_true",
-                    help="skip build/sbt -Phive package (only if the jar is current)")
+    speed.add_argument("--everything", action="store_true",
+                       help="every SBT module and every PySpark goal (days)")
+    build = ap.add_mutually_exclusive_group()
+    build.add_argument("--skip-build", action="store_true",
+                       help="skip the build (only if the jar is current)")
+    build.add_argument("--build-only", action="store_true",
+                       help="run just the build this plan needs, then stop "
+                            "(spark-presend overlaps it with lint)")
     ap.add_argument("--dry-run", action="store_true",
                     help="print the plan and the exact commands, run nothing")
+    ap.add_argument("--jobs", type=int, default=3, metavar="N",
+                    help="max concurrent test processes: one sbt plus PySpark "
+                         "lanes (default 3). Lanes past the first only run while "
+                         "the test lock has 2+ free slots; 1 is fully serial")
     ap.add_argument("--suite-timeout", type=int, default=90, metavar="MIN",
                     help="per-suite timeout in minutes (default 90; whole-module "
                          "runs get 8h)")
@@ -965,10 +1266,14 @@ def main():
                                    "then origin/master, then master)")
     ap.add_argument("--heap", help="HEAP_SIZE for SBT test JVMs (build default 4g)")
     args = ap.parse_args()
+    if args.jobs < 1:
+        ap.error("--jobs must be >= 1")
 
     root = find_root()
     venv_py = find_venv_python(root)
-    modules = scan_modules(root)
+    ci, ci_utils = load_ci(root)
+    profile_map = sbt_profiles(ci)
+    modules = scan_modules(root, KNOWN_MODULES | set(profile_map))
     if not modules:
         die("no modules found (no pom.xml files?) -- is this a full Spark checkout?")
 
@@ -977,7 +1282,7 @@ def main():
     base = base_ref(root, args.base)
     mb, files = changed_files(root, base)
     if (len(files) > 500 and not args.specs and not args.base
-            and (args.fast or args.modules)):
+            and not args.everything):
         die(f"{len(files)} changed files vs {base} -- the auto-detected base is "
             "almost certainly wrong (release branch diffed against master?). "
             "Re-run with --base <release-branch> or pass explicit suites.")
@@ -1003,11 +1308,14 @@ def main():
             say("doc-only diff: nothing to test. Done.")
             return 0
         if args.fast:
-            items, notes = plan_from_diff(root, modules, files, False)
-        elif args.modules:
-            items, notes = plan_from_diff(root, modules, files, True)
+            doctests = {g for g in ci.root.python_test_goals if is_doctest_goal(g)}
+            items, notes = plan_from_diff(root, modules, files, doctests)
         else:
-            items, notes = plan_all(root, modules)
+            mode = ("everything" if args.everything
+                    else "modules" if args.modules else "default")
+            items, notes = plan_ci(ci, ci_utils, code, mode)
+            if mode != "everything":
+                items = prune_py_by_imports(root, venv_py, code, items, notes)
 
     for n in notes:
         say(f"note: {n}")
@@ -1015,25 +1323,53 @@ def main():
         say("no test suites resolved from the diff; nothing to run. Done.")
         return 0
 
-    say(f"plan: {'skip ' if args.skip_build else ''}build + {len(items)} suite(s):")
+    profiles = ["-Phive"] + sorted(
+        {f for it in items if it.kind == "scala"
+         for f in profile_map.get(it.module, ())} - {"-Phive"})
+    py_items = [it for it in items if it.kind == "py"]
+    mod_items = [it for it in items if it.kind == "scala" and it.pattern == "--all--"]
+    # Diff-derived/explicit scala suites: ONE sbt boot per module.
+    scala_groups = {}
     for it in items:
+        if it.kind == "scala" and it.pattern != "--all--":
+            # Repeated CLI specs ('sql/*Foo* sql/*Foo*') would run the suite
+            # twice; the batch gains nothing from a duplicate pattern.
+            group = scala_groups.setdefault(it.module, [])
+            if all(g.pattern != it.pattern for g in group):
+                group.append(it)
+    runner = Runner(root, logdir, args.suite_timeout, args.heap, profiles,
+                    venv_py, echo_py=args.jobs == 1)
+    # PySpark tests needing sql/core's test classes skip without them (or run
+    # stale ones); CI builds Test/package for the same reason.
+    build_cmd = runner.sbt("package", *(["sql/Test/compile"] if py_items else []))
+    all_cmd = runner.sbt("all " + " ".join(f"{it.module}/test" for it in mod_items))
+
+    (logdir / "plan.txt").write_text(
+        "".join(f"{it.name()}\t{it.why}\n" for it in items))
+    say(f"plan: {'skip ' if args.skip_build else ''}build + {len(items)} suite(s), "
+        f"profiles {' '.join(profiles)} [full list: {logdir / 'plan.txt'}]:")
+    for it in items[:60]:
         extra = f"  env={it.env_extra}" if it.env_extra else ""
         say(f"  - {it.name():60s} (from {it.why}){extra}")
+    if len(items) > 60:
+        say(f"  ... and {len(items) - 60} more")
 
     if args.dry_run:
         say("dry run, would execute:")
         if not args.skip_build:
-            say("  + build/sbt -Phive package")
+            say(f"  + {' '.join(build_cmd)}")
+        if mod_items:
+            say(f"  + {' '.join(all_cmd)}")
         for it in items:
-            say(f"  + {' '.join(it.cmd(root, venv_py))}")
+            if it.pattern != "--all--":
+                say(f"  + {' '.join(it.cmd(runner))}")
         return 0
 
-    env_checks(root, venv_py, any(it.kind == "py" for it in items))
-    runner = Runner(root, logdir, args.suite_timeout, args.heap)
+    env_checks(root, venv_py, bool(py_items))
 
     def on_signal(signum, frame):
-        say(f"got signal {signum}, killing current step and stopping")
-        runner.kill_current()
+        say(f"got signal {signum}, killing running steps and stopping")
+        runner.kill_all()
         sys.exit(128 + signum)
 
     signal.signal(signal.SIGINT, on_signal)
@@ -1041,97 +1377,65 @@ def main():
 
     started = time.time()
     if not args.skip_build:
-        say("=== phase 1: build (build/sbt -Phive package) ===")
-        rc, _ = runner.run(["build/sbt", "-Phive", "package"],
-                           logdir / "build.log", runner.env, timeout=3 * 3600)
+        say(f"=== phase 1: build ({' '.join(build_cmd)}) ===")
+        rc, _ = runner.run(build_cmd, logdir / "build.log", runner.env,
+                           timeout=3 * 3600)
         if rc != 0:
             say(f"BUILD FAILED (rc={rc}); not running tests against a stale jar. "
                 f"See {logdir}/build.log")
             return 2
         say("build: OK")
+        if args.build_only:
+            return 0
     else:
         say("=== phase 1: build SKIPPED (--skip-build); jar had better be current ===")
 
-    say(f"=== phase 2: {len(items)} suite(s), full runs, keep going on failure ===")
-    # Diff-derived scala suites get ONE sbt boot per module, not one per
-    # suite -- a boot is minutes and fast mode can name a handful. sbt aborts
-    # the rest of a multi-command invocation on a failure, so run_scala_batch
-    # re-batches whatever never started. Py items stay one process per module
-    # (isolation), and --all-- module phases stay one boot each.
-    units = []          # ("batch", module) | ("item", it), in plan order
-    scala_groups = {}
-    for it in items:
-        if it.kind == "scala" and it.pattern != "--all--":
-            if it.module not in scala_groups:
-                scala_groups[it.module] = []
-                units.append(("batch", it.module))
-            # Repeated CLI specs ('sql/*Foo* sql/*Foo*') would run the suite
-            # twice; the batch gains nothing from a duplicate pattern.
-            if all(g.pattern != it.pattern for g in scala_groups[it.module]):
-                scala_groups[it.module].append(it)
-        else:
-            units.append(("item", it))
-    suite_results = []  # (item, rc, timed_out, logfile)
-    for unit_kind, payload in units:
-        if unit_kind == "batch":
-            group = scala_groups[payload]
-            batch_name = (group[0].name() if len(group) == 1
-                          else f"{payload}/batched-{len(group)}-suites")
-            logfile = logdir / (re.sub(r"[^\w.-]+", "_", batch_name) + ".log")
-            # scala items carry no env_extra; any group member's env will do.
-            env = runner.env_for(group[0], venv_py)
-            batch, rc, timed_out = run_scala_batch(
-                runner, payload, group, logfile, env)
-            suite_results.append((batch, rc, timed_out, logfile))
-            continue
-        it = payload
-        logfile = logdir / (re.sub(r"[^\w.-]+", "_", it.name()) + ".log")
-        env = runner.env_for(it, venv_py)
-        # A whole module's test phase is hours, not minutes.
-        timeout = 8 * 3600 if it.pattern == "--all--" else None
-        rc, timed_out = runner.run(it.cmd(root, venv_py), logfile, env,
-                                   timeout=timeout)
-        if rc != 0 and not timed_out and it.kind == "scala":
-            _, _, compile_failed = parse_scala_failures(logfile)
-            if compile_failed:
-                say(f"{it.name()}: compile failed, not retrying this suite")
-                suite_results.append((it, rc, timed_out, logfile))
-                continue
-        if rc != 0 and not timed_out:
-            # SBT itself dies sometimes (ivy hiccup, OOM in the build JVM).
-            # One do-over for the whole suite before parsing failures.
-            say(f"{it.name()}: rc={rc}, checking whether the run completed")
-            if it.kind == "scala":
-                # The do-over is for runs that died before completing; a run
-                # that completed with failures goes straight to phase 3
-                # (parsed failures used to gate this, which re-ran a 4.7h
-                # sql module for nothing). Parsed failures alone cannot
-                # prove completion: an abort can kill the forked JVM after
-                # them, and every later suite then never runs -- observed:
-                # connect-client-jdbc, 6 ABORTED lines, no task-end marker.
-                completed = False
-                try:
-                    with open(logfile, errors="replace") as lf:
-                        for line in lf:
-                            if TASK_END.search(line):
-                                completed = True
-                                break
-                except OSError:
-                    pass
-            else:
-                completed = bool(parse_py_failures(logfile))
-            if not completed:
-                say(f"{it.name()}: test task never finished; retrying the whole suite once")
-                rc, timed_out = runner.run(it.cmd(root, venv_py), logfile, env,
-                                           timeout=timeout)
-        suite_results.append((it, rc, timed_out, logfile))
+    say(f"=== phase 2: {len(items)} suite(s), full runs, keep going on failure, "
+        f"up to {args.jobs} at a time ===")
+
+    def scala_unit():
+        # All sbt work, in order, in ONE lane: two sbt processes in one
+        # worktree would race on compile output.
+        res = []
+        if mod_items:
+            res += run_scala_modules(runner, modules, mod_items, logdir, runner.env)
+        for mod, group in scala_groups.items():
+            name = (group[0].name() if len(group) == 1
+                    else f"{mod}/batched-{len(group)}-suites")
+            logfile = logdir / (safe_name(name) + ".log")
+            status, timed_out = run_scala_batch(
+                runner, mod, [it.pattern for it in group], logfile, runner.env)
+            batch = Item("scala", mod,
+                         group[0].pattern if len(group) == 1 else "--batch--",
+                         f"{len(group)} diff-derived suite(s) in {mod}")
+            batch.unrun = [p for p, s in status.items() if s == "unrun"]
+            failed = any(s == "failed" for s in status.values())
+            res.append((batch, 1 if failed else 0, timed_out, logfile))
+        return res
+
+    def py_unit(it):
+        logfile = logdir / (safe_name(it.name()) + ".log")
+        rc, timed_out = run_py(runner, it, logfile)
+        if rc != 0 and not timed_out and not it.doctest \
+                and not parse_py_failures(logfile):
+            # The process died before reporting a test (or the module did not
+            # import): one do-over before phase 3 has nothing to retry.
+            say(f"{it.name()}: rc={rc} with no parsed failure; one do-over")
+            rc, timed_out = run_py(runner, it, logfile)
+        return [(it, rc, timed_out, logfile)]
+
+    units = [(0, scala_unit)] if mod_items or scala_groups else []
+    units += [(1 if it.pattern.startswith(HEAVY_PY) else 2,
+               lambda it=it: py_unit(it)) for it in py_items]
+    suite_results = [r for rs in run_lanes(units, args.jobs) for r in rs]
 
     say("=== phase 3: re-run each failed test individually ===")
     flakes, real, not_retried = [], [], []
+    scala_retries, py_retries = [], []
     for it, rc, timed_out, logfile in suite_results:
         for p in it.unrun:
-            not_retried.append((it, f"never finished (batch aborted or "
-                                    f"timed out): {p}", logfile))
+            not_retried.append((it, f"never finished (aborted, hung or timed "
+                                    f"out): {p}", logfile))
         if rc == 0:
             continue
         if it.kind == "scala":
@@ -1148,10 +1452,12 @@ def main():
                 if not any(s.rsplit(".", 1)[-1] == fs.rsplit(".", 1)[-1]
                            for fs, _ in failed):
                     retry_specs.append((f"*{s.split('.')[-1]}", None, s))
+        elif it.doctest:
+            # Doctests have no per-test name to retry: the module goes again.
+            retry_specs = [(None, it.pattern, it.pattern)]
         else:
-            failed = parse_py_failures(logfile)
             retry_specs = []
-            for mc, t in failed:
+            for mc, t in parse_py_failures(logfile):
                 # Fixtures are not runnable test names -- "unittest
                 # module.Class.setUpClass" errors out and the retry would
                 # report a real failure. A fixture failure belongs to the
@@ -1169,30 +1475,49 @@ def main():
             else:
                 not_retried.append((it, "failed with no parseable test names", logfile))
             continue
-        env = runner.env_for(it, venv_py)
-        for suite_glob, test_name, label in retry_specs:
-            if it.kind == "scala":
-                cmd = ["build/sbt", "-Phive", f"{it.module}/testOnly {suite_glob}"]
-                if test_name is not None:
-                    safe = test_name.replace('"', '\\"')
-                    cmd = ["build/sbt", "-Phive",
-                           f'{it.module}/testOnly {suite_glob} -- -z "{safe}"']
-            else:
-                cmd = [venv_py, "-u", "-m", "unittest", test_name]
-            rlog = logdir / ("retry-" + re.sub(r"[^\w.-]+", "_", label)[:120] + ".log")
-            # Exactly one retry, deliberately not a knob: a test that fails
-            # twice is a thing to look at, not to re-roll until it passes.
-            rrc, _ = runner.run(cmd, rlog, env)
-            if rrc == 0:
-                flakes.append((it, label))
-                say(f"FLAKE: {label} (failed in the suite run, passed on retry)")
-            else:
-                real.append((it, label, rlog))
-                say(f"REAL FAILURE: {label} (failed twice -- suite run and retry)")
+        if it.kind == "scala":
+            scala_retries.append((it, retry_specs))
+        else:
+            py_retries += [(it, test, label) for _, test, label in retry_specs]
+
+    # Exactly one retry, deliberately not a knob: a test that fails twice is
+    # a thing to look at, not to re-roll until it passes.
+    def scala_retry_unit():
+        out = []
+        for it, specs in scala_retries:
+            pats = {}
+            for suite_glob, test, label in specs:
+                safe = (test or "").replace('"', '\\"')
+                pats[label] = (f'{suite_glob} -- -z "{safe}"' if test is not None
+                               else suite_glob)
+            rlog = logdir / ("retry-" + safe_name(it.name())[:120] + ".log")
+            status, _ = run_scala_batch(runner, it.module, list(pats.values()),
+                                        rlog, runner.env, retry=True)
+            out += [(it, label, status.get(p, "unrun"), rlog)
+                    for label, p in pats.items()]
+        return out
+
+    def py_retry_unit(it, test, label):
+        retry = Item("py", None, test, it.why, it.env_extra, it.doctest)
+        rlog = logdir / ("retry-" + safe_name(label)[:120] + ".log")
+        rc, _ = run_py(runner, retry, rlog)
+        return [(it, label, "ok" if rc == 0 else "failed", rlog)]
+
+    units = [(0, scala_retry_unit)] if scala_retries else []
+    units += [(1, lambda r=r: py_retry_unit(*r)) for r in py_retries]
+    for it, label, state, rlog in (r for rs in run_lanes(units, args.jobs) for r in rs):
+        if state == "ok":
+            flakes.append((it, label))
+            say(f"FLAKE: {label} (failed in the suite run, passed on retry)")
+        elif state == "failed":
+            real.append((it, label, rlog))
+            say(f"REAL FAILURE: {label} (failed twice -- suite run and retry)")
+        else:
+            not_retried.append((it, f"retry never ran: {label}", rlog))
 
     say("=== summary ===")
     elapsed = int(time.time() - started)
-    green = sum(1 for _, rc, _, _ in suite_results if rc == 0)
+    green = sum(1 for it, rc, _, _ in suite_results if rc == 0 and not it.unrun)
     lines = [
         f"worktree: {root}  branch: {branch}  base: {base}",
         f"build: {'skipped' if args.skip_build else 'OK'}",

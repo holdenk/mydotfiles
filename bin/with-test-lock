@@ -14,7 +14,23 @@ POLL_SECS=5
 usage() {
   echo "usage: with-test-lock -- command [args...]" >&2
   echo "       with-test-lock --status" >&2
+  echo "       with-test-lock --free     # print the number of free slots" >&2
   exit 2
+}
+
+# Count, not hold: a successful non-blocking flock means the slot is free, and
+# the subshell drops it immediately. A snapshot -- racy by nature, and only
+# meant for "is there headroom" checks (spark-compile-test-and-retry's extra
+# lanes), never as an acquire.
+free_count() {
+  mkdir -p "$LOCK_DIR"
+  local i n=0
+  for i in $(seq 0 $((MAX_SLOTS - 1))); do
+    if flock -n "$LOCK_DIR/slot-$i" true 2>/dev/null; then
+      n=$((n + 1))
+    fi
+  done
+  echo "$n"
 }
 
 write_holder() {
@@ -97,6 +113,10 @@ while [[ $# -gt 0 ]]; do
       WANT_STATUS=1
       shift
       ;;
+    --free)
+      WANT_STATUS=2
+      shift
+      ;;
     --)
       shift
       break
@@ -114,13 +134,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "$WANT_STATUS" == 1 ]]; then
+if [[ "$WANT_STATUS" != 0 ]]; then
   # Refuse rather than silently drop the command someone also passed.
   if [[ $# -gt 0 ]]; then
-    echo "with-test-lock: --status does not run a command (got: $*)" >&2
+    echo "with-test-lock: --status/--free do not run a command (got: $*)" >&2
     exit 2
   fi
-  status
+  if [[ "$WANT_STATUS" == 1 ]]; then status; else free_count; fi
   exit 0
 fi
 
