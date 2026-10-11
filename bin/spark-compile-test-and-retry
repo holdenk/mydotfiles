@@ -354,6 +354,17 @@ def is_doctest_goal(goal):
     return not goal.rsplit(".", 1)[-1].startswith("test_")
 
 
+def dangling_py_tests(root, ci, files):
+    """Changed test_*.py files no modules.py goal names (CI's own rule,
+    Module.missing_potential_python_test). Every plan built from modules.py
+    skips them; master's CI fails the PR over them, and older branches' CI
+    never runs them at all."""
+    goals = ci.root.python_test_goals
+    return [f for f in files
+            if re.fullmatch(r"test_.*\.py", Path(f).name) and (Path(root) / f).exists()
+            and not any(".".join(Path(f).parts)[:-3].endswith(g) for g in goals)]
+
+
 def plan_ci(ci, ci_utils, code, mode):
     """Whole-module plan from modules.py. mode: "everything", "default" (the
     touched modules plus their dependents -- CI's own selection) or "modules"
@@ -1293,6 +1304,12 @@ def main():
     say(f"worktree: {root}  branch: {branch}")
     say(f"base: {base} (merge-base {mb[:12]}), {len(files)} changed file(s)")
     say(f"logs: {logdir}")
+
+    dangling = [] if args.specs else dangling_py_tests(root, ci, files)
+    if dangling:
+        die(f"no dev/sparktestsupport/modules.py goal names {', '.join(dangling)}; "
+            "register each in its module's python_test_goals (master's CI fails "
+            "the PR over this, and older branches' CI never runs them)")
 
     notes = []
     if args.specs:

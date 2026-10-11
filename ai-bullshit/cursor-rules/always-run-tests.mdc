@@ -110,6 +110,9 @@ read the log; do not sit in a 30s foreground shell.
 - Explicit suites go to the test engine, not the gate: `spark-presend` takes no
  positional argument and errors out on one. Run
  `~/bin/spark-compile-test-and-retry '*RocksDBSuite*'` instead.
+- A new `test_*.py` goes into its module's `python_test_goals` in
+ `dev/sparktestsupport/modules.py`, or the test phase dies on it: master's
+ CI fails the PR over an unregistered test, and older branches never run it.
 - The **test phase** moves `JAVA_HOME` off a nix JDK onto a system one, and
  refuses to pick a JDK Spark rejects. `spark-presend` itself does not: its lint
  phase runs under whatever `JAVA_HOME` you gave it.

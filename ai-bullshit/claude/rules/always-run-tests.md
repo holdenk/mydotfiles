@@ -109,6 +109,9 @@ foreground shell hitting the timeout.
   `~/bin/spark-compile-test-and-retry '*RocksDBSuite*'` (or `sql/'*Foo*'`, or
   `pyspark.sql.tests.test_foo`). Dropping the spec to clear the error runs
   everything PR CI would.
+- A new `test_*.py` goes into its module's `python_test_goals` in
+  `dev/sparktestsupport/modules.py`, or the test phase dies on it: master's
+  CI fails the PR over an unregistered test, and older branches never run it.
 - The **test phase** moves `JAVA_HOME` off a nix JDK onto a system one, and
   refuses to pick a JDK Spark rejects. `spark-presend` itself does not: its lint
   phase runs under whatever `JAVA_HOME` you gave it.
