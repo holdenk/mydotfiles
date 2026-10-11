@@ -10,8 +10,9 @@ alwaysApply: true
 Run `~/bin/spark-presend` from the worktree root and wait for
 the result before any push to the fork. Static checks, lint, then
 `spark-compile-test-and-retry` for the tests. Pick the speed yourself --
-`--fast` by default, `--modules` for more complex changes, full (no flag)
-only when super complex and Holden has not said she is in a rush; do not
+`--fast` by default, `--modules` for more complex changes, no flag for
+what PR CI runs, `--everything` only when super complex and Holden has not
+said she is in a rush; do not
 block on asking her (details in `always-run-tests.mdc`). Green (flakes
 noted) -> push. Red -> fix first, then re-run. Do not push on a red run.
 

@@ -126,18 +126,21 @@ with `RUN_HYPOTHESIS_MAX_EXAMPLES=200` locally. Details in
 Pre-send before pushing a Spark branch:
 `~/bin/spark-presend` from the worktree root (background it,
 it is long). Static checks, lint (concurrent, lock-free -- linters are
-cheap; the lock bounds test JVM load), then `spark-compile-test-and-retry`
-for tests. A 24h wall-clock cap kills a wedged run, child tree included.
+cheap; the lock bounds test JVM load) with the test build alongside, then
+`spark-compile-test-and-retry` for tests. A 24h wall-clock cap kills a
+wedged run, child tree included.
 Pick the speed yourself -- `--fast` by default, `--modules` for more
-complex changes, full (no flag) only when super complex and Holden has not
-said she is in a rush. Do not block on asking her; judge, proceed, and say
+complex changes, no flag for what PR CI runs (touched modules plus their
+dependents, per the branch's `dev/sparktestsupport/modules.py`),
+`--everything` only when super complex and Holden has not said she is in a
+rush. Do not block on asking her; judge, proceed, and say
 which speed you chose. On a non-busy box (no other PRs in flight, test slots
 free -- check `~/bin/with-test-lock --status` and
 `gh pr list --author @me --state open`) it is reasonable to `spark-presend
---fast`, push, open the draft PR, then run a full `spark-presend` in the
+--fast`, push, open the draft PR, then run `spark-presend` (no flag) in the
 background and fix any follow-on failures. On a busy box (multiple PRs in
-flight or slots contended), `--fast` or `--modules` alone -- do not pile a
-days-long full run on a contended box; note a full run is still owed. Exit
+flight or slots contended), `--fast` or `--modules` alone -- do not pile the
+hours-long CI-scope run on a contended box; note it is still owed. Exit
 non-zero = fix before pushing. Run it (do not just suggest it) whenever a
 Spark task looks done and code changed; pure doc changes are exempt (it
 no-ops on doc-only diffs). `--dry-run` runs static checks only,

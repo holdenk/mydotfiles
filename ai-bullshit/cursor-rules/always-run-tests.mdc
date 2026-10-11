@@ -22,6 +22,7 @@ runs no tests, so it does not queue behind the runs that do.
 
     bash ~/bin/with-test-lock -- <build-or-test-command>
     bash ~/bin/with-test-lock --status
+    bash ~/bin/with-test-lock --free     # free-slot count
 
 Do not acquire in one shell and run in another; the wrapper is the holder.
 Backgrounding is fine if the wrapper is the parent (`block_until_ms: 0` /
@@ -44,12 +45,19 @@ coverage for the JVM side.
 ## Compile+test with retries: `spark-compile-test-and-retry`
 
 `~/bin/spark-compile-test-and-retry` from the worktree root is
-the build+test engine (formerly `spark-preflight`). It rebuilds
-(`build/sbt -Phive package`), runs the suites to completion under the test
-lock, then re-runs each failed test individually so flakes and real failures
-are not reported as the same thing. Diff-derived scala suites share ONE sbt
-boot per module (a boot is minutes), so the log is
-`<module>/batched-N-suites.log`, not one per suite. Logs and `summary.txt` land in
+the build+test engine (formerly `spark-preflight`). It plans from the
+branch's own `dev/sparktestsupport/modules.py` (CI's module graph and `-P`
+profiles, right on every branch), rebuilds (`build/sbt <profiles> package`,
+plus `sql/Test/compile` when PySpark tests run), runs the suites to
+completion under the test lock, then re-runs each failed test individually
+so flakes and real failures are not reported as the same thing. One sbt at
+a time: whole-module runs share ONE `sbt all a/test b/test ...` (modules run
+concurrently, up to SparkBuild's 4 test JVMs; logs `<module>-tests.log`),
+diff-derived suites share one boot per module
+(`<module>/batched-N-suites.log`), and scala retries batch per module too.
+PySpark modules spread over up to `--jobs` lanes (default 3): lanes past the
+first only start a test while the lock has 2+ free slots, and each test
+takes and drops its own slot. Logs and `summary.txt` land in
 `target/compile-test-and-retry-logs/<timestamp>/`. Exit 1 = real failures,
 fix before pushing. Exit 0 with flakes listed = pushable, but read the
 flakes.
@@ -59,16 +67,20 @@ the start is fine as a baseline to see what's already broken (and makes
 later failures easier to attribute), but a baseline green says nothing
 about your changes -- the after-run is still required.
 
-Three speeds: `--fast` is the diff-derived suites only, `--modules` is
-every suite in every touched module (hours), and the default (no flag) is
-ALL the tests (every SBT module's test phase plus every PySpark test module
--- days). Explicit suite specs override the speed, but only on
-spark-compile-test-and-retry.
+Four speeds: `--fast` is the diff-derived suites only, `--modules` is
+every suite in every touched module (hours), the default (no flag) is what
+PR CI runs -- the touched modules plus every module depending on one, full
+suites, with a core or build change mapping to everything (hours to days) --
+and `--everything` is every SBT module and every PySpark goal (days). On a
+python-only diff the default and `--modules` skip PySpark test modules that
+import nothing the diff touched (Spark's grimp check; needs `grimp` in the
+venv) -- less than PR CI from a fork runs. Explicit suite specs override the
+speed, but only on spark-compile-test-and-retry.
 
 **Choosing the speed -- make the call, do not ask.** Default to `--fast`.
 Step up to `--modules` when the change is more complex (cross-module, SQL
-core, streaming, anything that plausibly breaks neighbours). Run the full
-suite (no flag) only when the change is super complex AND Holden has not
+core, streaming, anything that plausibly breaks neighbours). Run
+`--everything` only when the change is super complex AND Holden has not
 said she is in a rush. Do not block on prompting her to pick a speed; judge,
 proceed, and say which speed you chose and why.
 
@@ -76,13 +88,13 @@ Machine busyness shapes the plan:
 
 - **Not busy** (no other PRs in flight, test slots free -- check
   `~/bin/with-test-lock --status` and `gh pr list --author @me --state
-  open`): run `spark-presend --fast`, push, open the draft PR, then run a
-  full `spark-presend` in the background and fix any follow-on failures it
-  surfaces. The fast gate gets the branch up; the full run catches the rest
-  without blocking the opening.
+  open`): run `spark-presend --fast`, push, open the draft PR, then run
+  `spark-presend` (no flag: what PR CI runs) in the background and fix any
+  follow-on failures it surfaces. The fast gate gets the branch up; the
+  CI-scope run catches the rest without blocking the opening.
 - **Busy** (multiple PRs in flight or slots contended): `--fast` or
-  `--modules` alone -- do not pile a days-long full run onto a contended
-  box. Note that a full run is still owed and say so.
+  `--modules` alone -- do not pile an hours-long CI-scope run onto a
+  contended box. Note that it is still owed and say so.
 
 It is long. Background it (`block_until_ms: 0` / `run_in_background`) and
 read the log; do not sit in a 30s foreground shell.
@@ -98,12 +110,17 @@ read the log; do not sit in a 30s foreground shell.
 - Explicit suites go to the test engine, not the gate: `spark-presend` takes no
  positional argument and errors out on one. Run
  `~/bin/spark-compile-test-and-retry '*RocksDBSuite*'` instead.
+- A new `test_*.py` goes into its module's `python_test_goals` in
+ `dev/sparktestsupport/modules.py`, or the test phase dies on it: master's
+ CI fails the PR over an unregistered test, and older branches never run it.
 - The **test phase** moves `JAVA_HOME` off a nix JDK onto a system one, and
  refuses to pick a JDK Spark rejects. `spark-presend` itself does not: its lint
  phase runs under whatever `JAVA_HOME` you gave it.
 - It sets the RocksDB-relevant env itself (AWS vars genuinely unset,
- `SPARK_LOCAL_IP/HOSTNAME`, `SPARK_LOCAL_DIRS` on the worktree disk for
- PySpark, exec-check on `/tmp` for the JNI extract, nofile bump) and
+ `SPARK_LOCAL_IP/HOSTNAME`, PySpark isolated per test the way
+ `python/run-tests` does it -- own `TMPDIR`, `java.io.tmpdir`, warehouse and
+ `SPARK_LOCAL_DIRS` on the worktree disk -- an exec-check on `target/` where
+ every test JVM extracts the JNI libs, nofile bump) and
  auto-enables `RUN_HYPOTHESIS=1` (200 examples) for the gated transpile
  suite wherever it gets enumerated.
 
@@ -119,11 +136,12 @@ backport adds it on an older branch -- drop the call and the import there,
 dup conf definitions, license headers, commit-subject hygiene, leftover
 debug calls), the repo linters for touched languages plus
 `dev/check-license` (concurrent and lock-free -- linters are cheap; the lock
-bounds test JVM load), then
+bounds test JVM load) with the test build running alongside, then
 `spark-compile-test-and-retry` (failed tests retried individually). A 24h
 wall-clock cap kills a wedged run, child tree included. The
 test phase speed follows the policy above (`--fast` by default, `--modules`
-for complex changes, full only when super complex and not in a rush).
-`--dry-run` does the static checks only, `--mima` adds dev/mima.
+for complex changes, no flag for what PR CI runs, `--everything` only when
+super complex and not in a rush). `--dry-run` does the static checks only,
+`--mima` adds dev/mima (after the build: it compiles too).
 `~/bin/rebase_update.sh` uses the same base detection and force-pushes to
 the fork (`origin`), never upstream.

@@ -185,6 +185,20 @@ def wall_watchdog(hours):
     os._exit(124)
 
 
+def wait_child(p):
+    """Wait on a tracked child running in its own session. Ctrl-C does not
+    reach it there, so kill its tree ourselves, or a multi-day test run
+    outlives us (and keeps its test-lock slot)."""
+    try:
+        return p.wait()
+    except KeyboardInterrupt:
+        kill_tree(p.pid)
+        p.wait()
+        raise
+    finally:
+        untrack_child(p)
+
+
 def report(level, msg):
     results[level].append(msg)
     say(f"{level.upper()}: {msg}")
@@ -390,23 +404,34 @@ def touched_conf_entries(root, added_lines):
     return entries, counts
 
 
-def conf_defined_on_base(root, base_ref, key):
-    """Files on the base branch containing a builder call for key. Matching
-    the builder, not just the quoted key, keeps mere references from
-    counting as definitions. git grep is POSIX ERE: no (?:...) or \\s."""
-    p = git(root, "grep", "-E", "-l",
-            r"(ConfigBuilder|buildConf|buildStaticConf)\([[:space:]]*\""
-            + re.escape(key) + "\"",
+def confs_defined_on_base(root, base_ref, keys):
+    """{key: files on the base branch with a builder call for it}, in ONE
+    whole-tree git grep (each costs most of a second). Matching the builder,
+    not just the quoted key, keeps mere references from counting as
+    definitions. git grep is POSIX ERE: no (?:...) or \\s."""
+    out = {k: [] for k in keys}
+    if not keys:
+        return out
+    p = git(root, "grep", "-E", "-o", "-z",
+            r"(ConfigBuilder|buildConf|buildStaticConf)\([[:space:]]*\"("
+            + "|".join(re.escape(k) for k in sorted(keys)) + ")\"",
             base_ref, "--", "*.scala", "*.java", check=False)
     if p.returncode == 1:
-        return []
+        return out
     if p.returncode != 0:
         # A failed lookup must not manufacture "new conf" errors; say so and
-        # treat the conf as pre-existing (skips dup/policy checks only).
-        report("warn", f"git grep for conf {key} on {base_ref} failed "
-                       f"({p.stderr.strip()[:80]}); skipping dup/policy checks")
-        return ["?"]
-    return [l.split(":", 1)[1] for l in p.stdout.splitlines()]
+        # treat the confs as pre-existing (skips dup/policy checks only).
+        report("warn", f"git grep for {len(keys)} conf key(s) on {base_ref} "
+                       f"failed ({p.stderr.strip()[:80]}); skipping dup/policy checks")
+        return {k: ["?"] for k in keys}
+    # -z: "<rev>:<path>\0<match>" per match.
+    for line in p.stdout.splitlines():
+        where, _, match = line.partition("\0")
+        m = CONF_BUILDER.search(match)
+        f = where.split(":", 1)[-1]
+        if m and m.group(1) in out and f not in out[m.group(1)]:
+            out[m.group(1)].append(f)
+    return out
 
 
 def check_confs(root, base_ref, base_ver, entries, counts, binding_policy,
@@ -421,6 +446,7 @@ def check_confs(root, base_ref, base_ver, entries, counts, binding_policy,
         return set()
     new_keys = {}
     seen = {}
+    on_base = confs_defined_on_base(root, base_ref, {k for k, _, _ in entries})
     for key, f, body in entries:
         if key in seen:
             report("error", f"conf {key}: defined twice in this diff "
@@ -429,8 +455,8 @@ def check_confs(root, base_ref, base_ver, entries, counts, binding_policy,
         if counts.get((key, f), 0) > 1:
             report("error", f"conf {key}: defined {counts[(key, f)]} times in "
                             f"{f} -- the second definition shadows the first")
-        base_files = conf_defined_on_base(root, base_ref, key)
-        # ["?"] means the base lookup FAILED (see conf_defined_on_base); it
+        base_files = on_base[key]
+        # ["?"] means the base lookup FAILED (see confs_defined_on_base); it
         # is not a file, and treating it as one manufactures a spurious
         # "already defined on base (?)" error.
         if base_files and base_files != ["?"]:
@@ -521,23 +547,25 @@ def check_conf_refs(root, base_ref, added, handled_keys):
         for line in lines:
             for m in CONF_REF.finditer(line):
                 refs.setdefault(m.group(1), f)
-    checked = 0
-    for key, f in sorted(refs.items()):
-        if key in handled_keys:
-            continue
-        if checked >= 25:
-            say(f"static: conf-ref check capped at 25; "
-                f"{len(refs) - checked} key(s) unchecked")
-            break
-        checked += 1
-        p = git(root, "grep", "-F", "-l", key, base_ref, check=False)
-        if p.returncode == 1:
-            report("info", f"{f} references conf {key} which is not defined "
-                           f"anywhere on {base_ref} (ok if a deliberate forward "
-                           "reference, wrong if the backport was supposed to add it)")
-        elif p.returncode != 0:
-            report("warn", f"git grep for {key} on {base_ref} failed: "
-                           f"{p.stderr.strip()[:100]}")
+    keys = sorted(k for k in refs if k not in handled_keys)
+    if not keys:
+        return
+    # One whole-tree grep for every key (each costs most of a second).
+    p = git(root, "grep", "-F", "-o", "-h", *(a for k in keys for a in ("-e", k)),
+            base_ref, check=False)
+    if p.returncode not in (0, 1):
+        report("warn", f"git grep for {len(keys)} conf ref(s) on {base_ref} "
+                       f"failed: {p.stderr.strip()[:100]}")
+        return
+    # -o reports one string per match, so a key that only ever occurs inside a
+    # longer one shows up as that longer string; a substring test counts it.
+    found = set(p.stdout.splitlines())
+    for key in keys:
+        if not any(key in s for s in found):
+            report("info", f"{refs[key]} references conf {key} which is not "
+                           f"defined anywhere on {base_ref} (ok if a deliberate "
+                           "forward reference, wrong if the backport was "
+                           "supposed to add it)")
 
 
 def check_license_headers(root, new_files):
@@ -801,17 +829,20 @@ def main():
     ap = argparse.ArgumentParser(
         prog="spark-presend",
         description="Pre-send gate for a Spark PR: static checks, lint/style, "
-                    "then ALL the tests via spark-compile-test-and-retry "
+                    "then what PR CI runs via spark-compile-test-and-retry "
                     "(with per-failed-test retries).")
     ap.add_argument("--base", help="base branch (default: detect from the open "
                                    "PR, then the branch name, then master)")
     speed = ap.add_mutually_exclusive_group()
     speed.add_argument("--fast", action="store_true",
                        help="test phase runs diff-derived suites only, for when "
-                            "in a hurry; the default is ALL the tests (days)")
+                            "in a hurry; the default is what PR CI runs")
     speed.add_argument("--modules", action="store_true",
                        help="test phase runs all suites in touched modules "
                             "(hours); the middle speed")
+    speed.add_argument("--everything", action="store_true",
+                       help="test phase runs every SBT module and PySpark goal "
+                            "(days)")
     ap.add_argument("--skip-static", action="store_true")
     ap.add_argument("--skip-lint", action="store_true")
     ap.add_argument("--skip-tests", action="store_true")
@@ -898,10 +929,47 @@ def main():
         say("dry run: skipping lint and tests")
         return 0 if not results["error"] else 2
 
+    speed_flag = (["--fast"] if args.fast else ["--modules"] if args.modules
+                  else ["--everything"] if args.everything else [])
+    if not args.skip_tests and not os.path.exists(TEST_RUNNER):
+        die(f"{TEST_RUNNER} not found; the test phase is "
+            "spark-compile-test-and-retry")
+    # The test phase's build runs alongside lint: neither needs the other.
+    # --build-only plans exactly what the later --skip-build run will (same
+    # base, same speed), so it builds the same goals with the same profiles.
+    build = None
+    if not args.skip_tests and not args.skip_build:
+        build_log = logdir / "test-build.log"
+        cmd = [TEST_RUNNER, "--build-only", "--base", base_ref, *speed_flag]
+        say(f"+ {' '.join(cmd)}   [alongside lint; log: {build_log}]")
+        with open(build_log, "w") as lf:
+            # stdin closed: an sbt prompt ("Project loading failed: (r)etry?")
+            # must read EOF and quit, not wait on a terminal nobody watches.
+            build = subprocess.Popen(cmd, cwd=root, stdin=subprocess.DEVNULL,
+                                     stdout=lf, stderr=subprocess.STDOUT,
+                                     start_new_session=True)
+        track_child(build)
+
     # --- phase 2: lint/style ---
     changed_py = [f for f in files if f.endswith(".py")]
     lint_ok = lint_phase(root, logdir, files, changed_py, args.skip_lint)
+    if not lint_ok and not args.force:
+        if build:
+            kill_tree(build.pid)
+            wait_child(build)
+        say("RESULT: RED (lint) -- fix or re-run with --force")
+        return 3
+    if build:
+        say(f"lint done; waiting on the test build [log: {build_log}]")
+        rc = wait_child(build)
+        if rc != 0:
+            sys.stdout.write("".join(
+                build_log.read_text(errors="replace").splitlines(True)[-15:]))
+            say(f"RESULT: RED (tests: build failed, rc={rc}); see {build_log}")
+            return 4
     if args.mima:
+        # After the build: dev/mima compiles too, and two compiling sbt
+        # processes in one worktree race on its output.
         rc, logfile, out = LintRunner(root, logdir).run("mima", ["./dev/mima"],
                                                         timeout_min=120)
         if out:
@@ -910,29 +978,21 @@ def main():
             report("error", f"dev/mima FAILED; see {logfile} -- add excludes "
                             "to project/MimaExcludes.scala or drop the "
                             "public API change from the backport")
-            lint_ok = False
+            if not args.force:
+                say("RESULT: RED (lint) -- fix or re-run with --force")
+                return 3
     elif any(f.endswith((".scala", ".java")) and "/test/" not in f
              for f in files):
         report("info", "CI runs dev/mima on every PR; if this adds or changes "
                        "public API, re-run with --mima to check binary compat "
                        "locally")
-    if not lint_ok and not args.force:
-        say("RESULT: RED (lint) -- fix or re-run with --force")
-        return 3
 
-    # --- phase 3: tests (ALL of them unless --modules/--fast, with retries) ---
+    # --- phase 3: tests (what PR CI runs, unless a speed flag says otherwise) ---
     if args.skip_tests:
         say("=== phase 3: tests SKIPPED (--skip-tests) ===")
     else:
-        if not os.path.exists(TEST_RUNNER):
-            die(f"{TEST_RUNNER} not found; the test phase is "
-                "spark-compile-test-and-retry")
-        cmd = [TEST_RUNNER, "--base", base_ref]
-        if args.fast:
-            cmd.append("--fast")
-        elif args.modules:
-            cmd.append("--modules")
-        if args.skip_build:
+        cmd = [TEST_RUNNER, "--base", base_ref, *speed_flag]
+        if args.skip_build or build:
             cmd.append("--skip-build")
         say(f"=== phase 3: tests: {' '.join(cmd)} ===")
         # Tracked + own session: the wall-clock watchdog can then kill the
@@ -940,17 +1000,7 @@ def main():
         # process group.
         p = subprocess.Popen(cmd, cwd=root, start_new_session=True)
         track_child(p)
-        try:
-            rc = p.wait()
-        except KeyboardInterrupt:
-            # Own session means Ctrl-C no longer reaches the runner; kill
-            # its tree ourselves or a multi-day test run outlives us (and
-            # keeps its test-lock slot).
-            kill_tree(p.pid)
-            p.wait()
-            raise
-        finally:
-            untrack_child(p)
+        rc = wait_child(p)
         if rc != 0:
             say(f"RESULT: RED (tests, spark-compile-test-and-retry rc={rc})")
             return 4  # 2/3 are taken by the static/lint phases
