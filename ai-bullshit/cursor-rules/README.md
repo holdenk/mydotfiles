@@ -17,6 +17,7 @@ worktrees those files are tracked upstream.
 | `spark-pyspark.mdc` | Spark worktrees -- venv, Scala + Python how to run tests |
 | `spark-conventions.mdc` | Spark worktrees -- security JIRA exception, Closed vs Merged, PR scope |
 | `spark-security-jira.mdc` | always -- no hole-describing tickets; innocuous titles maybe |
+| `security-review-before-commit.mdc` | always -- another agent reviews non-doc security diffs before commit |
 | `ZZ-index.mdc` | always -- short index + lock helper reminder |
 
 Shared lock helper (same path Claude uses):

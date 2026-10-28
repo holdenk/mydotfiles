@@ -2,8 +2,9 @@
 
 Applies to every repo in this workspace. Repo-specific `AGENTS.md` /
 `CLAUDE.md` take precedence for their own scope, except the standing rules
-here: always run tests, the `/tmp/test-lock` slots, and no hole-describing
-security JIRAs.
+here: always run tests, the `/tmp/test-lock` slots, no hole-describing
+security JIRAs, and another agent reviews non-doc security diffs before
+commit.
 
 Cursor's split copy is `~/.cursor/rules/`. This file is Claude's. Do not
 dual-write into a git repo -- in apache/spark worktrees `CLAUDE.md` is a
@@ -243,6 +244,23 @@ Two exceptions:
   not need the full multi-agent pass.
 
 Treat this as a standing request: it does not need to be asked for each time.
+
+## Security changes: another agent reviews before commit
+
+Before committing a security change that is not docs-only, a separate agent
+reviews the diff. Your own read does not count. Docs-only (`docs/`, `*.md`,
+`*.rst`) is exempt. A security change is one whose point is a fix or
+hardening, or a diff that changes auth, sandbox, deserialization,
+credentials, or permissions.
+
+Cursor: one `security-review` subagent, background off, `description`
+`Security Review`, `Diff: uncommitted changes`. Claude: `/security-review`
+on that diff. No such tool: spawn one other agent on the same diff. Do not
+commit until it finishes. Retry a failed review once; if it fails again,
+stop and say so. Fix real findings. If that changes the diff, review it
+once more, then commit. Anything you leave, say which and why. The review
+stays local -- nothing about the hole in the commit message, PR, or a
+comment. Skip when the current task is that review.
 
 ## Merging master into a branch: rebuild, test, then push
 

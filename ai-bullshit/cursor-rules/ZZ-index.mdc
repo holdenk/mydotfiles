@@ -30,6 +30,7 @@ home", nothing more.
 | `spark-pyspark.mdc` | Spark worktrees -- venv, how to run tests |
 | `spark-conventions.mdc` | Spark worktrees -- security JIRA exception, Closed vs Merged, PR scope |
 | `spark-security-jira.mdc` | always -- no hole-describing tickets; innocuous titles maybe |
+| `security-review-before-commit.mdc` | always -- another agent reviews non-doc security diffs before commit |
 
 Helper scripts live in `~/mydotfiles/bin/` (the dotfiles repo; `~/bin` is a
 symlink to it and is on `PATH`): `with-test-lock`,
