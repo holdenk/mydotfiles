@@ -19,15 +19,13 @@
 ;;;
 ;;; Requirements:
 ;;; - Emacs 27.1+ (tested with 31.0+)
-;;; - Internet connection for initial package installation
-;;; - For Scala: Metals language server
-;;; - For Java: Eclipse JDT Language Server (installed via lsp-java)
-;;; - For Python: Pyright language server
+;;; - Internet connection for initial package and language server installation
+;;; - Language servers are auto-installed on first use via lsp-mode
 ;;;
 ;;; Installation:
 ;;; 1. Copy this file to ~/.emacs or ~/.emacs.d/init.el
 ;;; 2. Start Emacs - packages will be installed automatically
-;;; 3. Install language servers as needed (e.g., metals for Scala)
+;;; 3. Open a source file - the language server will be installed automatically
 ;;;
 ;;; For detailed key bindings, see README_EMACS.md
 ;;;
@@ -89,7 +87,12 @@
 (unless package--initialized (package-initialize))
 
 ;; Refresh package contents if not already cached
-(unless package-archive-contents (package-refresh-contents))
+;; Wrapped in condition-case so Emacs starts normally when offline
+(unless package-archive-contents
+  (condition-case nil
+      (package-refresh-contents)
+    (error
+     (message "Warning: could not refresh package archives (offline?)"))))
 
 ;; List of packages to install automatically
 ;; Core packages for development workflow
@@ -120,6 +123,8 @@
   lsp-latex               ; LaTeX language server
   lsp-pyright             ; Python language server (Pyright)
   lsp-metals              ; Scala language server (Metals)
+  lsp-mssql               ; MSSQL language server
+  lsp-docker              ; Run LSP servers in Docker containers
   lsp-treemacs            ; LSP integration with Treemacs
   dap-mode                ; Debug Adapter Protocol support
   treemacs                ; Project tree navigator
@@ -139,9 +144,13 @@
 ))
 
 ;; Install any missing packages automatically
+;; Skip gracefully if offline or package archives are unavailable
 (dolist (package package-list)
   (unless (package-installed-p package)
-    (package-install package)))
+    (condition-case nil
+        (package-install package)
+      (error
+       (message "Warning: could not install package '%s' (offline?)" package)))))
 
 ;; Always ensure packages are installed when using use-package
 (setq use-package-always-ensure t)
@@ -189,17 +198,20 @@
 
 ;; Configure LSP mode with Scala support
 (use-package lsp-mode
+  :ensure t
   :hook ((scala-mode . lsp))
   :custom (lsp-completion-provider :capf))
 
 ;; DAP mode for debugging support
 (use-package dap-mode
+  :ensure t
   :after lsp-mode
   :commands dap-debug
   :config (dap-auto-configure-mode))
 
 ;; Metals (Scala language server) configuration
 (use-package lsp-metals
+  :ensure t
   :after lsp-mode
   :hook (scala-mode . lsp)
   :custom
@@ -211,8 +223,9 @@
   (lsp-file-watch-threshold 200000))
 
 ;; Treemacs for project navigation
-(use-package treemacs)
+(use-package treemacs :ensure t)
 (use-package lsp-treemacs
+  :ensure t
   :after (lsp-mode treemacs))
 
 ;; Scala mode key bindings and configuration
@@ -285,8 +298,10 @@
   (c-set-offset 'arglist-intro '+)
 ))
 
-;; Enable LSP for Java files
-(add-hook 'java-mode-hook #'lsp)
+;; Enable LSP for Java files via lsp-java (Eclipse JDT)
+(use-package lsp-java
+  :ensure t
+  :hook (java-mode . lsp))
 
 ;;; ============================================================================
 ;;; Documentation and Markup Modes
@@ -380,16 +395,52 @@
 ;;; ============================================================================
 
 ;; Configure LSP mode for various languages
+;; lsp-auto-install-server t => force-install servers on first use (no manual confirmation)
+;; lsp-auto-guess-root t     => auto-detect project root (no manual prompt)
 (use-package lsp-mode
-  ;; Enable lsp for scala
-  :hook (scala-mode . lsp)
-  :config (setq lsp-prefer-flymake nil))  ; Use flycheck instead of flymake
+  :ensure t
+  ;; Enable lsp for all supported language modes
+  :hook ((scala-mode . lsp)
+         (rust-mode . lsp)
+         (go-mode . lsp)
+         (typescript-mode . lsp)
+         (yaml-mode . lsp)
+         (dockerfile-mode . lsp)
+         (sh-mode . lsp)
+         (markdown-mode . lsp)
+         (clojure-mode . lsp)
+         (c-mode . lsp)
+         (c++-mode . lsp)
+         (css-mode . lsp)
+         (html-mode . lsp)
+         (json-mode . lsp)
+         (jsonnet-mode . lsp)
+         (nxml-mode . lsp))
+  :config
+  (setq lsp-prefer-flymake nil)          ; Use flycheck instead of flymake
+  (setq lsp-auto-install-server t)       ; Force-install language servers without manual confirmation
+  (setq lsp-auto-guess-root t))          ; Auto-detect project root without prompting
 
 ;; LSP UI enhancements
-(use-package lsp-ui)
+(use-package lsp-ui :ensure t)
 
-;; Enable LSP for XML files
-(add-hook 'nxml-mode-hook #'lsp)
+;; Python language server (Pyright)
+(use-package lsp-pyright
+  :ensure t
+  :hook (python-mode . lsp))
+
+;; LaTeX language server
+(use-package lsp-latex
+  :ensure t
+  :hook (latex-mode . lsp))
+
+;; MSSQL language server
+(use-package lsp-mssql
+  :ensure t
+  :hook (sql-mode . lsp))
+
+;; Run LSP servers inside Docker containers
+(use-package lsp-docker :ensure t)
 
 ;;; ============================================================================
 ;;; Rust Development Configuration
