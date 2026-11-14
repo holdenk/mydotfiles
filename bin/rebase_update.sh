@@ -49,6 +49,23 @@ esac
 # REMOTE to steer one of them silently repoints the others in the same shell.
 REMOTE="${REBASE_UPDATE_REMOTE:-${REMOTE:-upstream}}"
 FORK_REMOTE="${FORK_REMOTE:-origin}"
+# If gh says we're rate-limited while resolving PR base, wait/retry before
+# falling back to the branch-name heuristic.
+GH_RATE_LIMIT_WAIT_SECONDS="${GH_RATE_LIMIT_WAIT_SECONDS:-600}"
+GH_RATE_LIMIT_POLL_SECONDS="${GH_RATE_LIMIT_POLL_SECONDS:-30}"
+REBASE_FETCH_TIMEOUT_SECONDS="${REBASE_FETCH_TIMEOUT_SECONDS:-20}"
+case "$GH_RATE_LIMIT_WAIT_SECONDS" in
+  (''|*[!0-9]*) GH_RATE_LIMIT_WAIT_SECONDS=600 ;;
+esac
+case "$GH_RATE_LIMIT_POLL_SECONDS" in
+  (''|*[!0-9]*) GH_RATE_LIMIT_POLL_SECONDS=30 ;;
+esac
+if [ "$GH_RATE_LIMIT_POLL_SECONDS" -lt 1 ]; then
+  GH_RATE_LIMIT_POLL_SECONDS=1
+fi
+case "$REBASE_FETCH_TIMEOUT_SECONDS" in
+  (''|*[!0-9]*) REBASE_FETCH_TIMEOUT_SECONDS=20 ;;
+esac
 
 # Collapse a child's failure to 1. Exit 2 is rebase_update_batch.sh's
 # "systematic, stop the whole batch" signal, so it has to mean THIS script
@@ -82,7 +99,7 @@ detect_base_from_pr() {
   command -v gh >/dev/null 2>&1 || return 1
   # No --author @me: it switches --head to prefix matching and a same-named
   # backport branch (foo-4.x-r2) wins over the exact match. Filter exactly.
-  local out owner err rc
+  local out owner err rc now deadline reset wait_for wait_left have_timeout
   # --head matches any fork's branch of that name, so filter on the owner of
   # $FORK_REMOTE too -- otherwise a stranger's PR can hand us its base. An
   # empty owner would match nobody and read as "no PR", so say so instead.
@@ -105,20 +122,89 @@ detect_base_from_pr() {
   # only the subshell and the caller falls straight through to master.
   # gh's stderr goes to its own file, not into $out -- it prints update notices
   # on successful calls, and merged they become the "base branch".
-  err="$(mktemp)"
-  out=$(gh pr list --repo apache/spark --head "$BRANCH" --state open \
-      --json baseRefName,headRefName,headRepositoryOwner \
-      --jq '.[] | select(.headRefName=="'"$BRANCH"'")
-                | select(.headRepositoryOwner.login=="'"$owner"'") | .baseRefName' 2>"$err") \
-    && rc=0 || rc=$?
-  if [ "$rc" != 0 ]; then
-    echo "gh pr list failed, so the PR's base is unknown:" >&2
-    cat "$err" >&2
+  deadline=$(( $(date +%s) + GH_RATE_LIMIT_WAIT_SECONDS ))
+  have_timeout=0
+  command -v timeout >/dev/null 2>&1 && have_timeout=1
+  while :; do
+    now="$(date +%s)"
+    wait_left=$(( deadline - now ))
+    if [ "$wait_left" -le 0 ]; then
+      echo "gh pr list is still rate-limited after ${GH_RATE_LIMIT_WAIT_SECONDS}s;" >&2
+      echo "falling back to branch-name base detection." >&2
+      return 2
+    fi
+    err="$(mktemp)"
+    if [ "$have_timeout" = 1 ]; then
+      out=$(timeout "${wait_left}s" \
+          gh pr list --repo apache/spark --head "$BRANCH" --state open \
+            --json baseRefName,headRefName,headRepositoryOwner \
+            --jq '.[] | select(.headRefName=="'"$BRANCH"'")
+                      | select(.headRepositoryOwner.login=="'"$owner"'") | .baseRefName' \
+          2>"$err") && rc=0 || rc=$?
+      if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
+        echo "gh pr list timed out after ${wait_left}s while resolving PR base;" >&2
+        echo "falling back to branch-name base detection." >&2
+        rm -f "$err"
+        return 2
+      fi
+    else
+      out=$(gh pr list --repo apache/spark --head "$BRANCH" --state open \
+          --json baseRefName,headRefName,headRepositoryOwner \
+          --jq '.[] | select(.headRefName=="'"$BRANCH"'")
+                    | select(.headRepositoryOwner.login=="'"$owner"'") | .baseRefName' \
+          2>"$err") && rc=0 || rc=$?
+    fi
+    if [ "$rc" = 0 ]; then
+      rm -f "$err"
+      head -n 1 <<<"$out" | grep -v '^$' || return 1
+      return 0
+    fi
+    if ! grep -qiE 'rate[ -]?limit|secondary rate' "$err"; then
+      echo "gh pr list failed, so the PR's base is unknown:" >&2
+      cat "$err" >&2
+      rm -f "$err"
+      return 2
+    fi
+    now="$(date +%s)"
+    if [ "$now" -ge "$deadline" ]; then
+      echo "gh pr list is still rate-limited after ${GH_RATE_LIMIT_WAIT_SECONDS}s;" >&2
+      echo "falling back to branch-name base detection." >&2
+      cat "$err" >&2
+      rm -f "$err"
+      return 2
+    fi
+    wait_for="$GH_RATE_LIMIT_POLL_SECONDS"
+    if [ "$wait_for" -gt "$wait_left" ]; then
+      wait_for="$wait_left"
+    fi
+    if [ "$wait_for" -lt 1 ]; then
+      wait_for=1
+    fi
+    reset=""
+    if [ "$have_timeout" = 1 ]; then
+      reset="$(timeout "${wait_for}s" gh api rate_limit --jq '.rate.reset' 2>/dev/null || true)"
+    else
+      reset="$(gh api rate_limit --jq '.rate.reset' 2>/dev/null || true)"
+    fi
+    if [[ "$reset" =~ ^[0-9]+$ ]] && [ "$reset" -gt "$now" ]; then
+      wait_for=$(( reset - now + 1 ))
+      if [ "$wait_for" -gt "$GH_RATE_LIMIT_POLL_SECONDS" ]; then
+        wait_for="$GH_RATE_LIMIT_POLL_SECONDS"
+      fi
+    fi
+    now="$(date +%s)"
+    wait_left=$(( deadline - now ))
+    if [ "$wait_for" -gt "$wait_left" ]; then
+      wait_for="$wait_left"
+    fi
+    if [ "$wait_for" -lt 1 ]; then
+      wait_for=1
+    fi
+    echo "gh API rate-limited while resolving PR base; retrying in ${wait_for}s" >&2
+    echo "(${wait_left}s wait budget left before fallback)." >&2
     rm -f "$err"
-    return 2
-  fi
-  rm -f "$err"
-  head -n 1 <<<"$out" | grep -v '^$' || return 1
+    sleep "$wait_for"
+  done
 }
 
 detect_base_from_name() {
@@ -184,7 +270,17 @@ while [ $# -ge 1 ]; do
 done
 
 # Best-effort freshness for detection and the rebase target; offline is fine.
-git fetch --quiet "$REMOTE" 2>/dev/null || true
+if command -v timeout >/dev/null 2>&1; then
+  rc=0
+  timeout "${REBASE_FETCH_TIMEOUT_SECONDS}s" \
+    git fetch --quiet "$REMOTE" 2>/dev/null || rc="$?"
+  if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
+    echo "git fetch $REMOTE timed out after ${REBASE_FETCH_TIMEOUT_SECONDS}s;" >&2
+    echo "continuing with existing refs." >&2
+  fi
+else
+  git fetch --quiet "$REMOTE" 2>/dev/null || true
+fi
 
 if [ -z "$BASE" ]; then
   if BASE=$(detect_base_from_pr); then

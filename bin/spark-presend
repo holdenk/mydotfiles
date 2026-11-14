@@ -239,15 +239,28 @@ def detect_base(root, requested):
     # her PRs, and drops silently to the branch name and then to master. Both
     # default differently in the sibling tools (squash-magic uses origin,
     # update-bases apache-github), which is exactly how a stray value gets set.
-    # timeout: the helper fetches and calls gh, neither of which is bounded, and
-    # this is the pre-push gate. The inline code this replaced used timeout=20.
+    # The helper can now wait/retry on gh API rate limits for up to 10 minutes
+    # before falling back to branch-name detection; keep this timeout above that.
     env = dict(os.environ, REBASE_UPDATE_REMOTE="upstream", FORK_REMOTE="origin")
+    env.setdefault("GH_RATE_LIMIT_WAIT_SECONDS", "600")
+    env.setdefault("GH_RATE_LIMIT_POLL_SECONDS", "30")
+    try:
+        wait_budget = int(env.get("GH_RATE_LIMIT_WAIT_SECONDS", "600"))
+    except ValueError:
+        wait_budget = 600
+    try:
+        fetch_budget = int(env.get("REBASE_FETCH_TIMEOUT_SECONDS", "20"))
+    except ValueError:
+        fetch_budget = 20
+    # Give the helper enough headroom to consume its rate-limit wait budget
+    # and still run one final fallback attempt plus its own pre-check fetch.
+    helper_timeout = max(15 * 60, wait_budget + fetch_budget + 300)
     try:
         rb = subprocess.run([BASE_HELPER, "--print-base"], cwd=root, env=env,
-                            capture_output=True, text=True, timeout=90)
+                            capture_output=True, text=True, timeout=helper_timeout)
     except subprocess.TimeoutExpired:
-        die(f"{Path(BASE_HELPER).name} --print-base timed out (it fetches and "
-            "calls gh); pass --base explicitly")
+        die(f"{Path(BASE_HELPER).name} --print-base timed out after {helper_timeout}s; "
+            "pass --base explicitly")
 
     def _helper_stderr(stderr):
         # No xtrace filtering: the helper disables `set -x` for --print-base
@@ -316,16 +329,20 @@ def has_binding_policy_api(root, base_ref):
 
 # --- diff --------------------------------------------------------------------
 
-def collect_diff(root, base_ref):
+def collect_diff(root, base_ref, include_untracked=True, untracked_paths=None):
     mb = git(root, "merge-base", "HEAD", base_ref).stdout.strip()
     # --diff-filter=d drops deleted files: nothing to lint or scan in a file
     # that no longer exists.
-    names = git(root, "diff", "--name-only", "--diff-filter=d", mb) \
-        .stdout.splitlines()
-    untracked = git(root, "ls-files", "--others", "--exclude-standard") \
-        .stdout.splitlines()
-    new_files = set(git(root, "diff", "--name-only", "--diff-filter=A", mb)
-                    .stdout.splitlines()) | set(untracked)
+    tracked = {f for f in git(root, "diff", "--name-only", "--diff-filter=d", mb)
+               .stdout.splitlines() if f}
+    untracked = set()
+    if include_untracked:
+        if untracked_paths is None:
+            untracked_paths = git(root, "ls-files", "--others", "--exclude-standard") \
+                .stdout.splitlines()
+        untracked = {f for f in untracked_paths if f}
+    new_files = {f for f in git(root, "diff", "--name-only", "--diff-filter=A", mb)
+                 .stdout.splitlines() if f} | set(untracked)
     # Added lines per file, for conf/debug/ref scanning. -U0 keeps it small.
     # added_lines tracks new-file line numbers so conf checks can tell which
     # entry in a file the diff actually touched. removed tracks old-file line
@@ -365,15 +382,15 @@ def collect_diff(root, base_ref):
         elif cur:
             new_line += 1
     # Untracked files have no diff lines; treat the whole file as added.
-    for f in untracked:
+    for f in sorted(untracked):
         try:
             lines = (Path(root) / f).read_text(errors="replace").splitlines()
             added.setdefault(f, []).extend(lines)
             added_lines.setdefault(f, set()).update(range(1, len(lines) + 1))
         except OSError:
             pass
-    files = sorted({*names, *untracked} - {""})
-    return mb, files, new_files, added, added_lines, removed
+    files = sorted(tracked | untracked)
+    return mb, files, new_files, added, added_lines, removed, len(tracked), len(untracked)
 
 
 # --- static checks -----------------------------------------------------------
@@ -854,6 +871,9 @@ def main():
                     help="run later phases even if an earlier phase is red")
     ap.add_argument("--dry-run", action="store_true",
                     help="resolve base and run static checks only")
+    ap.add_argument("--ignore-untracked", action="store_true",
+                    help="ignore untracked files in diff/static checks "
+                         "(useful for large local venv/build trees)")
     ap.add_argument("--max-wall-hours", type=float, default=24, metavar="H",
                     help="kill the whole run after H hours (default 24; a "
                          "presend that old is wedged, not thorough). 0 disables")
@@ -888,10 +908,24 @@ def main():
         check=False).returncode == 0 else base
     bver = base_version(root, base_ref)
     branch = git(root, "branch", "--show-current").stdout.strip()
-    mb, files, new_files, added, added_lines, removed = \
-        collect_diff(root, base_ref)
-    if len(files) > 500 and not args.base:
-        die(f"{len(files)} changed files vs {base_ref} -- the auto-detected "
+    untracked_seed = None
+    if not args.ignore_untracked:
+        untracked_seed = [f for f in
+                          git(root, "ls-files", "--others", "--exclude-standard")
+                          .stdout.splitlines() if f]
+        if len(untracked_seed) > 500:
+            die(f"{len(untracked_seed)} untracked files in this worktree; presend would "
+                "scan mostly noise. Clean those files or re-run with "
+                "--ignore-untracked.")
+    mb, files, new_files, added, added_lines, removed, tracked_n, untracked_n = \
+        collect_diff(
+            root,
+            base_ref,
+            include_untracked=not args.ignore_untracked,
+            untracked_paths=untracked_seed,
+        )
+    if tracked_n > 500 and not args.base:
+        die(f"{tracked_n} tracked changed files vs {base_ref} -- the auto-detected "
             f"base '{base}' is almost certainly wrong (master-based branch "
             "diffed against a release branch?). Re-run with --base <branch>.")
 
@@ -899,7 +933,9 @@ def main():
     logdir.mkdir(parents=True, exist_ok=True)
     say(f"worktree: {root}  branch: {branch}")
     say(f"base: {base} ({base_ref}), branch version {vstr(bver)}, "
-        f"{len(files)} changed file(s)")
+        f"{len(files)} changed file(s) [tracked={tracked_n}, untracked={untracked_n}]")
+    if args.ignore_untracked:
+        say("note: untracked files ignored (--ignore-untracked)")
     say(f"logs: {logdir}")
 
     # --- phase 1: static ---
@@ -941,6 +977,8 @@ def main():
     if not args.skip_tests and not args.skip_build:
         build_log = logdir / "test-build.log"
         cmd = [TEST_RUNNER, "--build-only", "--base", base_ref, *speed_flag]
+        if args.ignore_untracked:
+            cmd.append("--ignore-untracked")
         say(f"+ {' '.join(cmd)}   [alongside lint; log: {build_log}]")
         with open(build_log, "w") as lf:
             # stdin closed: an sbt prompt ("Project loading failed: (r)etry?")
@@ -992,6 +1030,8 @@ def main():
         say("=== phase 3: tests SKIPPED (--skip-tests) ===")
     else:
         cmd = [TEST_RUNNER, "--base", base_ref, *speed_flag]
+        if args.ignore_untracked:
+            cmd.append("--ignore-untracked")
         if args.skip_build or build:
             cmd.append("--skip-build")
         say(f"=== phase 3: tests: {' '.join(cmd)} ===")

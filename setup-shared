@@ -426,7 +426,7 @@ fi
 # .gitignore -- add new ones there when tools/ grows them.
 FRANK_DIR=~/franktheunicorn
 if [ -d "$FRANK_DIR/.git" ]; then
-  git -C "$FRANK_DIR" pull --ff-only
+  git -C "$FRANK_DIR" pull --ff-only || echo "Someones working on frank locally"
 else
   git clone https://github.com/franktheunicorn/franktheunicorn "$FRANK_DIR"
 fi
